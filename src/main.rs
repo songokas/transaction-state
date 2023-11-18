@@ -1,4 +1,4 @@
-use std::{any::Any, future::Future, marker::PhantomData, pin::Pin};
+use std::{any::Any, future::Future, marker::PhantomData, pin::Pin, process::Output};
 
 struct AmlState {}
 
@@ -57,44 +57,82 @@ where
     })
 }
 
-struct SagaDefinition1<FactoryData, FactoryResult> {
-    name: &'static str,
-    operation: Box<dyn FnOnce(FactoryData) -> FactoryResult>,
-}
-
-fn combine<I, X, O, F1, F2>(f1: F1, f2: F2) -> impl FnOnce(I) -> O
+fn combine<I: 'static, X, O: 'static, F1: 'static, F2: 'static>(
+    f1: F1,
+    f2: F2,
+) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = O>>>
 where
     F1: FnOnce(I) -> X,
-    F2: FnOnce(X) -> O,
+    F2: FnOnce(X) -> Pin<Box<dyn Future<Output = O>>>,
 {
-    move |i| f2(f1(i))
+    move |i| Box::pin(f2(f1(i)))
 }
 
-impl<FactoryData: 'static, FactoryResult: 'static> SagaDefinition1<FactoryData, FactoryResult> {
-    fn new<Factory>(name: &'static str, operation: Operation, factory: Factory) -> Self
+fn combine_f<I: 'static, X, O, F1: 'static, F2: 'static>(
+    f1: F1,
+    f2: F2,
+) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = O>>>
+where
+    F1: FnOnce(I) -> Pin<Box<dyn Future<Output = X>>>,
+    F2: FnOnce(X) -> Pin<Box<dyn Future<Output = O>>>,
+{
+    move |i| Box::pin(async { f2(f1(i).await).await })
+}
+
+struct SagaDefinition1<In, OperationResult> {
+    name: &'static str,
+    operation: Box<dyn FnOnce(In) -> Pin<Box<dyn Future<Output = OperationResult>>> + 'static>,
+    // operation: Box<dyn FnOnce(FactoryResult) -> OperationResult>,
+}
+
+impl<FactoryData: 'static, OperationResult: 'static> SagaDefinition1<FactoryData, OperationResult> {
+    fn new<Operation, Factory, FactoryResult: 'static>(
+        name: &'static str,
+        operation: Operation,
+        factory: Factory,
+    ) -> Self
     where
         Factory: FnOnce(FactoryData) -> FactoryResult + 'static,
+        Operation:
+            FnOnce(FactoryResult) -> Pin<Box<dyn Future<Output = OperationResult>>> + 'static,
+    {
+        Self {
+            name,
+            operation: Box::new(combine(factory, operation)),
+            // factory: Box::new(factory),
+        }
+    }
+
+    fn new_future<Operation, NewResult>(name: &'static str, operation: Operation) -> Self
+    where
+        Operation: FnOnce(FactoryData) -> Pin<Box<dyn Future<Output = OperationResult>>> + 'static,
     {
         Self {
             name,
             operation: Box::new(operation),
+            // factory: Box::new(factory),
         }
     }
 
-    fn step<NewResult: 'static, Factory, Operation, OperationResult, OperationFuture>(
+    fn step<NewResult: 'static, Factory, Operation, FactoryResult: 'static, NewFuture: 'static>(
         self,
+        operation: Operation,
         factory: Factory,
-    ) -> SagaDefinition1<FactoryData, NewResult>
+    ) -> SagaDefinition1<FactoryResult, NewFuture>
     where
+        Operation: FnOnce(NewResult) -> Pin<Box<dyn Future<Output = NewFuture>>> + 'static,
         Factory: FnOnce(FactoryResult) -> NewResult + 'static,
-        Operation: FnOnce(FactoryResult) -> OperationFuture + 'static,
-        OperationFuture: Future<Output = OperationResult> + 'static,
     {
-        SagaDefinition1::new(self.name, combine(self.operation, factory))
+        SagaDefinition1::new(
+            self.name, operation,
+            factory,
+            // combine(factory, operation),
+            // combine_f(self.operation, combine(factory, operation)),
+        )
     }
 
-    async fn run(self, data: FactoryData) -> FactoryResult {
-        (self.operation)(data)
+    async fn run(self, data: FactoryData) -> OperationResult {
+        (self.operation)(data).await
     }
 }
 
@@ -171,8 +209,16 @@ fn handle_external_data(external_data: bool) -> bool {
     external_data
 }
 
-fn create_retry_definition() -> SagaDefinition {
-    SagaDefinition::new("create_retry_definition").step(update_external_data, |data| data)
+async fn ts() -> bool {
+    true
+}
+
+fn create_retry_definition() -> SagaDefinition1<String, bool> {
+    SagaDefinition1::new(
+        "create_retry_definition",
+        move |a| Box::pin(ts()),
+        |data| "a".to_string(),
+    )
 }
 
 fn test1(a: bool) -> String {
@@ -190,11 +236,11 @@ fn test3(b: i64) -> i32 {
     1
 }
 
-fn create_retry_definition1() -> SagaDefinition1<bool, i32> {
-    SagaDefinition1::new("create_retry_definition", test1)
-        .step(test2)
-        .step(test3)
-}
+// fn create_retry_definition1() -> SagaDefinition1<bool, i32> {
+//     SagaDefinition1::new("create_retry_definition", test1)
+//         .step(test2)
+//         .step(test3)
+// }
 
 fn create_multiple_steps() -> SagaDefinition {
     SagaDefinition::new("create_multiple_steps")
@@ -231,8 +277,8 @@ fn create_multiple_steps_persist() -> SagaDefinition {
 #[tokio::main]
 async fn main() {
     // operation will run as long as transaction completes even if the server crashes
-    let definition = create_retry_definition1();
-    let initial_data = true;
+    let definition = create_retry_definition();
+    let initial_data = "as".to_string();
     // must complete
     db_transaction(|transaction| {
         // update record
@@ -240,7 +286,7 @@ async fn main() {
         // definition.build(initial_data);
     })
     .await;
-    let r: i32 = definition.run(initial_data).await;
+    let r: bool = definition.run(initial_data).await;
 
     // // operations will run one after another, will not rerun in case of a crash
     // let definition = create_multiple_steps();
