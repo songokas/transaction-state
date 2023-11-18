@@ -57,6 +57,47 @@ where
     })
 }
 
+struct SagaDefinition1<FactoryData, FactoryResult> {
+    name: &'static str,
+    operation: Box<dyn FnOnce(FactoryData) -> FactoryResult>,
+}
+
+fn combine<I, X, O, F1, F2>(f1: F1, f2: F2) -> impl FnOnce(I) -> O
+where
+    F1: FnOnce(I) -> X,
+    F2: FnOnce(X) -> O,
+{
+    move |i| f2(f1(i))
+}
+
+impl<FactoryData: 'static, FactoryResult: 'static> SagaDefinition1<FactoryData, FactoryResult> {
+    fn new<Factory>(name: &'static str, operation: Operation, factory: Factory) -> Self
+    where
+        Factory: FnOnce(FactoryData) -> FactoryResult + 'static,
+    {
+        Self {
+            name,
+            operation: Box::new(operation),
+        }
+    }
+
+    fn step<NewResult: 'static, Factory, Operation, OperationResult, OperationFuture>(
+        self,
+        factory: Factory,
+    ) -> SagaDefinition1<FactoryData, NewResult>
+    where
+        Factory: FnOnce(FactoryResult) -> NewResult + 'static,
+        Operation: FnOnce(FactoryResult) -> OperationFuture + 'static,
+        OperationFuture: Future<Output = OperationResult> + 'static,
+    {
+        SagaDefinition1::new(self.name, combine(self.operation, factory))
+    }
+
+    async fn run(self, data: FactoryData) -> FactoryResult {
+        (self.operation)(data)
+    }
+}
+
 struct SagaDefinition {
     name: &'static str,
     operations: Vec<(Box<FnAnyToAny>, Box<FnAnyToAny>)>,
@@ -125,12 +166,34 @@ async fn db_transaction(callback: impl FnOnce(Transaction)) {
     println!("db_transaction");
 }
 
-fn handle_external_data(external_data: bool) {
+fn handle_external_data(external_data: bool) -> bool {
     println!("handle_external_data with {external_data}");
+    external_data
 }
 
 fn create_retry_definition() -> SagaDefinition {
     SagaDefinition::new("create_retry_definition").step(update_external_data, |data| data)
+}
+
+fn test1(a: bool) -> String {
+    println!("1");
+    "hello".to_string()
+}
+
+fn test2(b: String) -> i64 {
+    println!("2");
+    1
+}
+
+fn test3(b: i64) -> i32 {
+    println!("3");
+    1
+}
+
+fn create_retry_definition1() -> SagaDefinition1<bool, i32> {
+    SagaDefinition1::new("create_retry_definition", test1)
+        .step(test2)
+        .step(test3)
 }
 
 fn create_multiple_steps() -> SagaDefinition {
@@ -168,7 +231,7 @@ fn create_multiple_steps_persist() -> SagaDefinition {
 #[tokio::main]
 async fn main() {
     // operation will run as long as transaction completes even if the server crashes
-    let definition = create_retry_definition();
+    let definition = create_retry_definition1();
     let initial_data = true;
     // must complete
     db_transaction(|transaction| {
@@ -177,13 +240,13 @@ async fn main() {
         // definition.build(initial_data);
     })
     .await;
-    let r: bool = definition.run(initial_data).await;
+    let r: i32 = definition.run(initial_data).await;
 
-    // operations will run one after another, will not rerun in case of a crash
-    let definition = create_multiple_steps();
-    let r: bool = definition.run(initial_data).await;
+    // // operations will run one after another, will not rerun in case of a crash
+    // let definition = create_multiple_steps();
+    // let r: bool = definition.run(initial_data).await;
 
-    // operations will run one after another, will rerun in case of a crash
-    let definition = create_multiple_steps_persist();
-    let r: bool = definition.run(initial_data).await;
+    // // operations will run one after another, will rerun in case of a crash
+    // let definition = create_multiple_steps_persist();
+    // let r: bool = definition.run(initial_data).await;
 }
