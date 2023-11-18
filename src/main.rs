@@ -1,289 +1,278 @@
-use std::{any::Any, future::Future, marker::PhantomData, pin::Pin, process::Output};
+use std::{error::Error, fmt, future::Future, marker::PhantomData, pin::Pin};
 
-struct AmlState {}
+use uuid::Uuid;
 
-// struct OperationDefinition<
-//     FactoryData,
-//     FactoryResult,
-//     OperationResult,
-//     Operation: FnOnce(FactoryResult) -> F,
-//     F: Future<Output = OperationResult>,
-//     Factory: FnOnce(FactoryData) -> FactoryResult,
-// > {
-//     factory: Factory,
-//     operation: Box<Operation>,
-// }
-
-// trait RunFactory {
-//     fn run(&self);
-// }
-
-// trait RunOperation {
-//     fn run(&self);
-// }
-
-// struct SagaOperation {}
-
-// struct SagaFactory<Factory, FactoryResult, FactoryData>
-// where
-//     Factory: FnOnce(FactoryData) -> FactoryResult,
-// {
-//     callback: Factory,
-//     _data: PhantomData<FactoryData>,
-//     _result: PhantomData<FactoryResult>,
-// }
-
-// impl<FactoryResult, FactoryData, Factory> RunFactory
-//     for SagaFactory<Factory, FactoryResult, FactoryData>
-// where
-//     Factory: FnOnce(FactoryData) -> FactoryResult,
-// {
-//     fn run(&self, data: FactoryData) -> FactoryResult {
-//         (self.callback)(data)
-//     }
-// }
-
-pub type FnAnyToAny = dyn FnOnce(Box<dyn Any>) -> Box<dyn Any>;
-
-pub fn make_any_to_any<I, O, F>(f: F) -> Box<FnAnyToAny>
-where
-    I: 'static,
-    O: 'static,
-    F: FnOnce(I) -> O + 'static,
-{
-    Box::new(move |i: Box<dyn Any>| -> Box<dyn Any> {
-        let i: Box<I> = Box::<dyn Any + 'static>::downcast(i).expect("wrong input type");
-        Box::new(f(*i))
-    })
-}
-
-fn combine<F, I: 'static, X, O: 'static, F1: 'static, F2: 'static>(
+fn combine<E, F, I: 'static, X, O: 'static, F1: 'static, F2: 'static>(
     f1: F1,
     f2: F2,
-) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = O>>>
+) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = Result<O, E>>>>
 where
     F1: FnOnce(I) -> X,
     F2: FnOnce(X) -> F,
-    F: Future<Output = O> + 'static,
+    F: Future<Output = Result<O, E>> + 'static,
+    E: Error,
 {
     move |i| Box::pin(f2(f1(i)))
 }
 
-fn combine_f<Fut1, Fut2, I: 'static, X, O, F1: 'static, F2: 'static>(
+fn combine_f<E, Fut1, Fut2, I: 'static, X, O, F1: 'static, F2: 'static>(
     f1: F1,
     f2: F2,
-) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = O>>>
+) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = Result<O, E>>>>
 where
     F1: FnOnce(I) -> Fut1,
     F2: FnOnce(X) -> Fut2,
-    Fut1: Future<Output = X> + 'static,
-    Fut2: Future<Output = O> + 'static,
+    Fut1: Future<Output = Result<X, E>> + 'static,
+    Fut2: Future<Output = Result<O, E>> + 'static,
+    E: Error,
 {
-    move |i| Box::pin(async { f2(f1(i).await).await })
+    move |i| Box::pin(async { f2(f1(i).await?).await })
 }
 
-struct SagaDefinition1<In, OperationResult> {
+struct SagaDefinition<State, In, OperationResult, E> {
     name: &'static str,
-    operation: Box<dyn FnOnce(In) -> Pin<Box<dyn Future<Output = OperationResult>>> + 'static>,
-    // operation: Box<dyn FnOnce(FactoryResult) -> OperationResult>,
+    // state: State,
+    operation:
+        Box<dyn FnOnce(In) -> Pin<Box<dyn Future<Output = Result<OperationResult, E>>>> + 'static>,
+    _state: PhantomData<State>,
 }
 
-impl<FactoryData: 'static, OperationResult: 'static> SagaDefinition1<FactoryData, OperationResult> {
-    fn new<F, Operation, Factory, FactoryResult: 'static>(
+impl<State: 'static, FactoryData: 'static, OperationResult: 'static, E: 'static>
+    SagaDefinition<State, FactoryData, OperationResult, E>
+{
+    fn new<StateCreator, F, Operation, Factory, FactoryResult: 'static>(
         name: &'static str,
+        state: StateCreator,
         operation: Operation,
         factory: Factory,
     ) -> Self
     where
-        Factory: FnOnce(FactoryData) -> FactoryResult + 'static,
+        StateCreator: FnOnce(FactoryData) -> State + 'static,
+        Factory: FnOnce(&State) -> FactoryResult + 'static,
         Operation: FnOnce(FactoryResult) -> F + 'static,
-        F: Future<Output = OperationResult> + 'static,
+        F: Future<Output = Result<OperationResult, E>> + 'static,
+        E: Error,
     {
         Self {
             name,
-            operation: Box::new(combine(factory, operation)),
-            // factory: Box::new(factory),
+            // state,
+            operation: Box::new(combine(state, combine(|state| factory(&state), operation))),
+            _state: PhantomData::default(),
         }
     }
 
-    fn step<F, NewResult: 'static, Factory, Operation, NewFuture: 'static>(
-        self,
-        operation: Operation,
-        factory: Factory,
-    ) -> SagaDefinition1<FactoryData, NewFuture>
-    where
-        Operation: FnOnce(NewResult) -> F + 'static,
-        Factory: FnOnce(OperationResult) -> NewResult + 'static,
-        F: Future<Output = NewFuture> + 'static,
-    {
-        SagaDefinition1 {
-            name: self.name,
-            // combine(factory, operation),
-            operation: Box::new(combine_f(self.operation, combine(factory, operation))),
-        }
-    }
+    // fn step<F, NewResult: 'static, Factory, Operation, NewFuture: 'static>(
+    //     self,
+    //     operation: Operation,
+    //     factory: Factory,
+    // ) -> SagaDefinition<State, FactoryData, NewFuture, E>
+    // where
+    //     Operation: FnOnce(NewResult) -> F + 'static,
+    //     Factory: FnOnce(State, OperationResult) -> NewResult + 'static,
+    //     F: Future<Output = NewFuture> + 'static,
+    //     E: Error,
+    // {
+    //     SagaDefinition {
+    //         name: self.name,
+    //         // state: self.state,
+    //         _state: PhantomData::default(),
+    //         operation: Box::new(combine_f(self.operation, combine(factory, operation))),
+    //     }
+    // }
 
-    async fn run(self, data: FactoryData) -> OperationResult {
+    async fn run(self, data: FactoryData) -> Result<OperationResult, E> {
         (self.operation)(data).await
     }
 }
 
-struct SagaDefinition {
-    name: &'static str,
-    operations: Vec<(Box<FnAnyToAny>, Box<FnAnyToAny>)>,
-}
-
-impl SagaDefinition {
-    fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            operations: Vec::new(),
-        }
-    }
-    fn step<
-        Operation,
-        Factory,
-        FactoryData: 'static,
-        FactoryResult: 'static,
-        OperationResult,
-        OperationFuture,
-    >(
-        mut self,
-        operation: Operation,
-        factory: Factory,
-    ) -> Self
-    where
-        Factory: FnOnce(FactoryData) -> FactoryResult + 'static,
-        Operation: FnOnce(FactoryResult) -> OperationFuture + 'static,
-        OperationFuture: Future<Output = OperationResult> + 'static,
-    {
-        self.operations
-            .push((make_any_to_any(operation), make_any_to_any(factory)));
-        self
-    }
-
-    async fn run<In, Out>(self, data: In) -> Out
-    where
-        In: 'static,
-        Out: 'static,
-    {
-        let input: Box<dyn Any + 'static> = Box::new(data);
-        let output = self
-            .operations
-            .into_iter()
-            .fold(input, |acc, (operation, factory)| {
-                // let factory_callback: Box<dyn FnOnce(dyn Any) -> dyn Any> =
-                //     factory.downcast().expect("factory");
-                // // let operation_callback = operation.downcast().expect("operation");
-                // // Box::new(operation_callback(factory_callback(data)))
-                // Box::new((factory_callback)(*acc))
-                factory(acc)
-            });
-        let o: Box<Out> = Box::<dyn Any + 'static>::downcast(output).expect("wrong output type");
-        *o
-    }
-}
-
+#[derive(Debug)]
 struct Transaction {}
 
-async fn update_external_data(external_input: String) -> bool {
-    println!("update_external_data with {external_input}");
-    true
+#[derive(Debug)]
+struct TransactionError {}
+
+impl fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "TransactionError")
+    }
 }
 
-async fn db_transaction(callback: impl FnOnce(Transaction)) {
-    callback(Transaction {});
+impl Error for TransactionError {}
+
+#[derive(Debug)]
+struct LocalError {}
+
+impl fmt::Display for LocalError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "LocalError")
+    }
+}
+
+impl Error for LocalError {}
+
+#[derive(Debug)]
+struct ExternalError {}
+
+impl fmt::Display for ExternalError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ExternalError")
+    }
+}
+
+impl Error for ExternalError {}
+
+#[derive(Debug)]
+struct ConversionError {}
+
+async fn db_transaction<T>(
+    callback: impl FnOnce(Transaction) -> Result<T, TransactionError>,
+) -> Result<T, TransactionError> {
     println!("db_transaction");
+    callback(Transaction {})
 }
 
-fn handle_external_data(external_data: bool) -> bool {
-    println!("handle_external_data with {external_data}");
-    external_data
+// create order - local service
+// create ticket - external service
+// confirm ticket - local service
+// send ticket by mail - external service
+
+type OrderId = Uuid;
+type TicketId = Uuid;
+type EmailId = Uuid;
+
+#[derive(Clone, Copy)]
+struct Order {
+    order_id: OrderId,
+    ticket_id: Option<TicketId>,
 }
 
-async fn ts() -> bool {
-    true
+struct TicketEmail {
+    email_id: EmailId,
 }
 
-fn create_retry_definition() -> SagaDefinition1<String, bool> {
-    SagaDefinition1::new("create_retry_definition", update_external_data, |data| {
-        "a".to_string()
+async fn create_order(order_id: OrderId) -> Result<Order, LocalError> {
+    println!("create_order with {order_id}");
+    db_transaction(|t| {
+        Ok(Order {
+            order_id,
+            ticket_id: None,
+        })
     })
-    .step(update_external_data, |data| data.to_string())
+    .await
+    .map_err(|_| LocalError {})
 }
 
-fn test1(a: bool) -> String {
-    println!("1");
-    "hello".to_string()
+async fn create_ticket(order: Order) -> Result<TicketId, ExternalError> {
+    println!("create_ticket with order {}", order.order_id);
+    execute_remote_service(order.order_id).await
 }
 
-fn test2(b: String) -> i64 {
-    println!("2");
-    1
+async fn confirm_ticket((mut order, ticket_id): (Order, TicketId)) -> Result<Order, LocalError> {
+    println!("confirm_ticket with {ticket_id}");
+    db_transaction(|t| {
+        order.ticket_id = ticket_id.into();
+        Ok(order)
+    })
+    .await
+    .map_err(|_| LocalError {})
 }
 
-fn test3(b: i64) -> i32 {
-    println!("3");
-    1
+async fn send_ticket(order: Order) -> Result<EmailId, ExternalError> {
+    println!("send_ticket with order {}", order.order_id);
+    execute_remote_service(order.order_id).await
 }
 
-// fn create_retry_definition1() -> SagaDefinition1<bool, i32> {
-//     SagaDefinition1::new("create_retry_definition", test1)
-//         .step(test2)
-//         .step(test3)
+async fn execute_remote_service(id: Uuid) -> Result<Uuid, ExternalError> {
+    println!("execute_remote_service with {id}");
+    Ok(Uuid::new_v4())
+}
+
+struct SagaOrderState {
+    order: Order,
+}
+
+impl SagaOrderState {
+    fn new(order: Order) -> SagaOrderState {
+        Self { order }
+    }
+
+    fn create_ticket(&self) -> Order {
+        self.order
+    }
+
+    fn confirm_ticket(&self, ticket_id: TicketId) -> (Order, TicketId) {
+        (self.order, ticket_id)
+    }
+
+    fn send_ticket(&self, _order: Order) -> Order {
+        self.order
+    }
+}
+
+fn create_from_ticket() -> SagaDefinition<SagaOrderState, Order, TicketId, ExternalError> {
+    // let state = SagaOrderState { order: None };
+    SagaDefinition::new(
+        "create_from_ticket",
+        SagaOrderState::new,
+        create_ticket,
+        SagaOrderState::create_ticket,
+    )
+    // .step(confirm_ticket, SagaOrderState::confirm_ticket)
+    // .step(send_ticket, SagaOrderState::send_ticket)
+}
+
+// fn create_all() -> SagaDefinition {
+//     SagaDefinition::new("create_multiple_steps", create_order, |data| data)
+//         .step(create_ticket, convert_external_data)
+//         .step(confirm_ticket)
+//         .step(send_ticket)
 // }
 
-fn create_multiple_steps() -> SagaDefinition {
-    SagaDefinition::new("create_multiple_steps")
-        .step(update_external_data, |data| data)
-        .step(
-            |external_data| async {
-                // must complete
-                db_transaction(|_| {
-                    // update record
-                    // save external data
-                })
-                .await;
-            },
-            handle_external_data,
-        )
-}
-
-fn create_multiple_steps_persist() -> SagaDefinition {
-    SagaDefinition::new("create_multiple_steps_persist")
-        .step(update_external_data, |initial_data| initial_data)
-        .step(
-            |external_data| async {
-                // must complete
-                db_transaction(|_| {
-                    // update record
-                    // save external data
-                })
-                .await;
-            },
-            handle_external_data,
-        )
-}
+// fn create_all_persist() -> SagaDefinition {
+//     SagaDefinition::new(
+//         "create_multiple_steps_persist",
+//         update_local_data,
+//         |initial_data| initial_data,
+//     )
+//     .step(
+//         |external_data| async {
+//             // must complete
+//             db_transaction(|_| {
+//                 // update record
+//                 // save external data
+//             })
+//             .await
+//         },
+//         convert_external_data,
+//     )
+// }
 
 #[tokio::main]
 async fn main() {
+    let order_id = OrderId::new_v4();
     // operation will run as long as transaction completes even if the server crashes
-    let definition = create_retry_definition();
-    let initial_data = "as".to_string();
+    let definition = create_from_ticket();
     // must complete
-    db_transaction(|transaction| {
-        // update record
-        // save operation event
+    let order = db_transaction(|transaction| {
+        Ok(Order {
+            order_id,
+            ticket_id: None,
+        })
         // definition.build(initial_data);
     })
-    .await;
-    let r: bool = definition.run(initial_data).await;
+    .await
+    .unwrap();
+    let r: EmailId = definition.run(order).await.unwrap();
 
+    // let order = Order {};
+    // let ticket = 1;
     // // operations will run one after another, will not rerun in case of a crash
     // let definition = create_multiple_steps();
-    // let r: bool = definition.run(initial_data).await;
+    // let r: bool = definition.run((order, ticket)).await;
 
+    // let order = Order {};
+    // let ticket = 1;
     // // operations will run one after another, will rerun in case of a crash
     // let definition = create_multiple_steps_persist();
-    // let r: bool = definition.run(initial_data).await;
+    // let r: bool = definition.run((order, ticket)).await;
 }
