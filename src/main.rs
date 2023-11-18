@@ -1,33 +1,12 @@
-use std::{error::Error, fmt, future::Future, marker::PhantomData, pin::Pin};
+use std::{
+    error::Error,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use uuid::Uuid;
-
-// fn combine<E, F, I: 'static, X, O: 'static, F1: 'static, F2: 'static>(
-//     f1: F1,
-//     f2: F2,
-// ) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = Result<O, E>>>>
-// where
-//     F1: FnOnce(I) -> X,
-//     F2: FnOnce(X) -> F,
-//     F: Future<Output = Result<O, E>> + 'static,
-//     E: Error,
-// {
-//     move |i| Box::pin(f2(f1(i)))
-// }
-
-// fn combine_f<E, Fut1, Fut2, I: 'static, X, O, F1: 'static, F2: 'static>(
-//     f1: F1,
-//     f2: F2,
-// ) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = Result<O, E>>>>
-// where
-//     F1: FnOnce(I) -> Fut1,
-//     F2: FnOnce(X) -> Fut2,
-//     Fut1: Future<Output = Result<X, E>> + 'static,
-//     Fut2: Future<Output = Result<O, E>> + 'static,
-//     E: Error,
-// {
-//     move |i| Box::pin(async { f2(f1(i).await?).await })
-// }
 
 type OperationDefinition<State, In, OperationResult, E> = Box<
     dyn FnOnce(
@@ -40,72 +19,58 @@ type OperationDefinition<State, In, OperationResult, E> = Box<
 
 struct SagaDefinition<State, In, OperationResult, E> {
     name: &'static str,
-    // state: State,
     operation: OperationDefinition<State, In, OperationResult, E>,
-    // _state: PhantomData<State>,
 }
 
-impl<State: Clone + 'static, FactoryData: 'static, OperationResult: 'static, E: 'static>
-    SagaDefinition<State, FactoryData, OperationResult, E>
+impl<State: Clone + 'static, FactoryData: 'static, OperationResult: 'static, WrappingError>
+    SagaDefinition<State, FactoryData, OperationResult, WrappingError>
 {
-    fn new<StateCreator, F, Operation, Factory, FactoryResult: 'static>(
+    fn new<StateCreator>(
         name: &'static str,
         state: StateCreator,
-        operation: Operation,
-        factory: Factory,
+        initial_data: OperationResult,
     ) -> Self
     where
         StateCreator: FnOnce(FactoryData) -> State + 'static,
-        Factory: FnOnce(&State) -> FactoryResult + 'static,
-        Operation: FnOnce(FactoryResult) -> F + 'static,
-        F: Future<Output = Result<OperationResult, E>> + 'static,
-        E: Error,
     {
         Self {
             name,
-            // state,
             operation: Box::new(|fd| {
                 let s = state(fd);
-                let d = factory(&s);
-                let f = Box::pin(operation(d));
+                let f = Box::pin(async move { Result::<_, WrappingError>::Ok(initial_data) });
                 (s, f)
             }),
-            // _state: PhantomData::default(),
         }
     }
 
-    fn step<F, FactoryResult: 'static, Factory, Operation, NewFutureResult: 'static>(
+    fn step<NewError, F, FactoryResult: 'static, Factory, Operation, NewFutureResult: 'static>(
         self,
         operation: Operation,
         factory: Factory,
-    ) -> SagaDefinition<State, FactoryData, NewFutureResult, E>
+    ) -> SagaDefinition<State, FactoryData, NewFutureResult, WrappingError>
     where
         Operation: FnOnce(FactoryResult) -> F + 'static,
         Factory: FnOnce(&State, OperationResult) -> FactoryResult + 'static,
-        F: Future<Output = Result<NewFutureResult, E>> + 'static,
-        E: Error,
+        F: Future<Output = Result<NewFutureResult, NewError>> + 'static,
+        WrappingError: Error + From<NewError> + 'static,
     {
         let previous = self.operation;
         SagaDefinition {
             name: self.name,
-            // state: self.state,
-            // _state: PhantomData::default(),
-            operation: Box::new(
-                |d| {
-                    let (prs, prf) = previous(d);
-                    let s = prs.clone();
-                    let f = Box::pin(async move {
-                        let prd = prf.await;
-                        let ns = factory(&s, prd?);
-                        operation(ns).await
-                    });
-                    (prs, f)
-                }, // combine(|s, r| factory(&s, r), operation),
-            ),
+            operation: Box::new(|d| {
+                let (prs, prf) = previous(d);
+                let s = prs.clone();
+                let f = Box::pin(async move {
+                    let prd = prf.await;
+                    let ns = factory(&s, prd?);
+                    operation(ns).await.map_err(WrappingError::from)
+                });
+                (prs, f)
+            }),
         }
     }
 
-    async fn run(self, data: FactoryData) -> Result<OperationResult, E> {
+    async fn run(self, data: FactoryData) -> Result<OperationResult, WrappingError> {
         let (_state, f) = (self.operation)(data);
         f.await
     }
@@ -200,19 +165,15 @@ type OrderId = Uuid;
 type TicketId = Uuid;
 type EmailId = Uuid;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Order {
     order_id: OrderId,
     ticket_id: Option<TicketId>,
 }
 
-struct TicketEmail {
-    email_id: EmailId,
-}
-
 async fn create_order(order_id: OrderId) -> Result<Order, LocalError> {
     println!("create_order with {order_id}");
-    db_transaction(|t| {
+    db_transaction(|_t| {
         Ok(Order {
             order_id,
             ticket_id: None,
@@ -227,14 +188,14 @@ async fn create_ticket(order: Order) -> Result<TicketId, ExternalError> {
     execute_remote_service(order.order_id).await
 }
 
-async fn confirm_ticket((mut order, ticket_id): (Order, TicketId)) -> Result<Order, ExternalError> {
+async fn confirm_ticket((mut order, ticket_id): (Order, TicketId)) -> Result<Order, LocalError> {
     println!("confirm_ticket with {ticket_id}");
-    db_transaction(|t| {
+    db_transaction(|_t| {
         order.ticket_id = ticket_id.into();
         Ok(order)
     })
     .await
-    .map_err(|_| ExternalError {})
+    .map_err(|_| LocalError {})
 }
 
 async fn send_ticket(order: Order) -> Result<EmailId, ExternalError> {
@@ -257,64 +218,79 @@ impl SagaOrderState {
         Self { order }
     }
 
-    fn create_ticket(&self) -> Order {
-        self.order
+    fn create_ticket(&self, _: ()) -> Order {
+        self.order.clone()
     }
 
     fn confirm_ticket(&self, ticket_id: TicketId) -> (Order, TicketId) {
-        (self.order, ticket_id)
+        (self.order.clone(), ticket_id)
     }
 
-    fn send_ticket(&self, _order: Order) -> Order {
-        self.order
+    fn send_ticket(&self, order: Order) -> Order {
+        order
     }
 }
 
-fn create_from_ticket() -> SagaDefinition<SagaOrderState, Order, TicketId, ExternalError> {
-    // let state = SagaOrderState { order: None };
+#[derive(Clone)]
+struct SagaFullOrderState {
+    order: Arc<Mutex<Option<Order>>>,
+}
+
+impl SagaFullOrderState {
+    fn new(_order: Option<Order>) -> Self {
+        Self {
+            order: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn generate_order_id(&self, order_id: OrderId) -> OrderId {
+        order_id
+    }
+
+    fn set_order_and_create_ticket(&self, order: Order) -> Order {
+        *self.order.lock().unwrap() = Some(order.clone());
+        order
+    }
+
+    fn confirm_ticket(&self, ticket_id: TicketId) -> (Order, TicketId) {
+        (self.order.lock().unwrap().clone().unwrap(), ticket_id)
+    }
+
+    fn send_ticket(&self, order: Order) -> Order {
+        order
+    }
+}
+
+fn create_from_existing_order() -> SagaDefinition<SagaOrderState, Order, TicketId, GeneralError> {
+    SagaDefinition::new("create_from_ticket", SagaOrderState::new, ())
+        .step(create_ticket, SagaOrderState::create_ticket)
+        .step(confirm_ticket, SagaOrderState::confirm_ticket)
+        .step(send_ticket, SagaOrderState::send_ticket)
+}
+
+fn create_full_order() -> SagaDefinition<SagaFullOrderState, Option<Order>, TicketId, GeneralError>
+{
     SagaDefinition::new(
-        "create_from_ticket",
-        SagaOrderState::new,
-        create_ticket,
-        SagaOrderState::create_ticket,
+        "create_from_existing_order",
+        SagaFullOrderState::new,
+        OrderId::new_v4(),
     )
-    .step(confirm_ticket, SagaOrderState::confirm_ticket)
-    .step(send_ticket, SagaOrderState::send_ticket)
+    .step(create_order, SagaFullOrderState::generate_order_id)
+    .step(
+        create_ticket,
+        SagaFullOrderState::set_order_and_create_ticket,
+    )
+    .step(confirm_ticket, SagaFullOrderState::confirm_ticket)
+    .step(send_ticket, SagaFullOrderState::send_ticket)
 }
-
-// fn create_all() -> SagaDefinition {
-//     SagaDefinition::new("create_multiple_steps", create_order, |data| data)
-//         .step(create_ticket, convert_external_data)
-//         .step(confirm_ticket)
-//         .step(send_ticket)
-// }
-
-// fn create_all_persist() -> SagaDefinition {
-//     SagaDefinition::new(
-//         "create_multiple_steps_persist",
-//         update_local_data,
-//         |initial_data| initial_data,
-//     )
-//     .step(
-//         |external_data| async {
-//             // must complete
-//             db_transaction(|_| {
-//                 // update record
-//                 // save external data
-//             })
-//             .await
-//         },
-//         convert_external_data,
-//     )
-// }
 
 #[tokio::main]
 async fn main() {
     let order_id = OrderId::new_v4();
     // operation will run as long as transaction completes even if the server crashes
-    let definition = create_from_ticket();
+    let definition = create_from_existing_order();
     // must complete
-    let order = db_transaction(|transaction| {
+    let order = db_transaction(|_t| {
         Ok(Order {
             order_id,
             ticket_id: None,
@@ -324,12 +300,12 @@ async fn main() {
     .await
     .unwrap();
     let r: EmailId = definition.run(order).await.unwrap();
+    println!("Received email {r}");
 
-    // let order = Order {};
-    // let ticket = 1;
-    // // operations will run one after another, will not rerun in case of a crash
-    // let definition = create_multiple_steps();
-    // let r: bool = definition.run((order, ticket)).await;
+    // operations will run one after another, will not rerun in case of a crash
+    let definition = create_full_order();
+    let r: EmailId = definition.run(None).await.unwrap();
+    println!("Received email {r}");
 
     // let order = Order {};
     // let ticket = 1;
