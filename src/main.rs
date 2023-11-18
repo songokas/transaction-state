@@ -2,42 +2,50 @@ use std::{error::Error, fmt, future::Future, marker::PhantomData, pin::Pin};
 
 use uuid::Uuid;
 
-fn combine<E, F, I: 'static, X, O: 'static, F1: 'static, F2: 'static>(
-    f1: F1,
-    f2: F2,
-) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = Result<O, E>>>>
-where
-    F1: FnOnce(I) -> X,
-    F2: FnOnce(X) -> F,
-    F: Future<Output = Result<O, E>> + 'static,
-    E: Error,
-{
-    move |i| Box::pin(f2(f1(i)))
-}
+// fn combine<E, F, I: 'static, X, O: 'static, F1: 'static, F2: 'static>(
+//     f1: F1,
+//     f2: F2,
+// ) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = Result<O, E>>>>
+// where
+//     F1: FnOnce(I) -> X,
+//     F2: FnOnce(X) -> F,
+//     F: Future<Output = Result<O, E>> + 'static,
+//     E: Error,
+// {
+//     move |i| Box::pin(f2(f1(i)))
+// }
 
-fn combine_f<E, Fut1, Fut2, I: 'static, X, O, F1: 'static, F2: 'static>(
-    f1: F1,
-    f2: F2,
-) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = Result<O, E>>>>
-where
-    F1: FnOnce(I) -> Fut1,
-    F2: FnOnce(X) -> Fut2,
-    Fut1: Future<Output = Result<X, E>> + 'static,
-    Fut2: Future<Output = Result<O, E>> + 'static,
-    E: Error,
-{
-    move |i| Box::pin(async { f2(f1(i).await?).await })
-}
+// fn combine_f<E, Fut1, Fut2, I: 'static, X, O, F1: 'static, F2: 'static>(
+//     f1: F1,
+//     f2: F2,
+// ) -> impl FnOnce(I) -> Pin<Box<dyn Future<Output = Result<O, E>>>>
+// where
+//     F1: FnOnce(I) -> Fut1,
+//     F2: FnOnce(X) -> Fut2,
+//     Fut1: Future<Output = Result<X, E>> + 'static,
+//     Fut2: Future<Output = Result<O, E>> + 'static,
+//     E: Error,
+// {
+//     move |i| Box::pin(async { f2(f1(i).await?).await })
+// }
+
+type OperationDefinition<State, In, OperationResult, E> = Box<
+    dyn FnOnce(
+        In,
+    ) -> (
+        State,
+        Pin<Box<dyn Future<Output = Result<OperationResult, E>>>>,
+    ),
+>;
 
 struct SagaDefinition<State, In, OperationResult, E> {
     name: &'static str,
     // state: State,
-    operation:
-        Box<dyn FnOnce(In) -> Pin<Box<dyn Future<Output = Result<OperationResult, E>>>> + 'static>,
-    _state: PhantomData<State>,
+    operation: OperationDefinition<State, In, OperationResult, E>,
+    // _state: PhantomData<State>,
 }
 
-impl<State: 'static, FactoryData: 'static, OperationResult: 'static, E: 'static>
+impl<State: Clone + 'static, FactoryData: 'static, OperationResult: 'static, E: 'static>
     SagaDefinition<State, FactoryData, OperationResult, E>
 {
     fn new<StateCreator, F, Operation, Factory, FactoryResult: 'static>(
@@ -56,32 +64,50 @@ impl<State: 'static, FactoryData: 'static, OperationResult: 'static, E: 'static>
         Self {
             name,
             // state,
-            operation: Box::new(combine(state, combine(|state| factory(&state), operation))),
-            _state: PhantomData::default(),
+            operation: Box::new(|fd| {
+                let s = state(fd);
+                let d = factory(&s);
+                let f = Box::pin(operation(d));
+                (s, f)
+            }),
+            // _state: PhantomData::default(),
         }
     }
 
-    // fn step<F, NewResult: 'static, Factory, Operation, NewFuture: 'static>(
-    //     self,
-    //     operation: Operation,
-    //     factory: Factory,
-    // ) -> SagaDefinition<State, FactoryData, NewFuture, E>
-    // where
-    //     Operation: FnOnce(NewResult) -> F + 'static,
-    //     Factory: FnOnce(State, OperationResult) -> NewResult + 'static,
-    //     F: Future<Output = NewFuture> + 'static,
-    //     E: Error,
-    // {
-    //     SagaDefinition {
-    //         name: self.name,
-    //         // state: self.state,
-    //         _state: PhantomData::default(),
-    //         operation: Box::new(combine_f(self.operation, combine(factory, operation))),
-    //     }
-    // }
+    fn step<F, FactoryResult: 'static, Factory, Operation, NewFutureResult: 'static>(
+        self,
+        operation: Operation,
+        factory: Factory,
+    ) -> SagaDefinition<State, FactoryData, NewFutureResult, E>
+    where
+        Operation: FnOnce(FactoryResult) -> F + 'static,
+        Factory: FnOnce(&State, OperationResult) -> FactoryResult + 'static,
+        F: Future<Output = Result<NewFutureResult, E>> + 'static,
+        E: Error,
+    {
+        let previous = self.operation;
+        SagaDefinition {
+            name: self.name,
+            // state: self.state,
+            // _state: PhantomData::default(),
+            operation: Box::new(
+                |d| {
+                    let (prs, prf) = previous(d);
+                    let s = prs.clone();
+                    let f = Box::pin(async move {
+                        let prd = prf.await;
+                        let ns = factory(&s, prd?);
+                        operation(ns).await
+                    });
+                    (prs, f)
+                }, // combine(|s, r| factory(&s, r), operation),
+            ),
+        }
+    }
 
     async fn run(self, data: FactoryData) -> Result<OperationResult, E> {
-        (self.operation)(data).await
+        let (_state, f) = (self.operation)(data);
+        f.await
     }
 }
 
@@ -123,6 +149,40 @@ impl Error for ExternalError {}
 
 #[derive(Debug)]
 struct ConversionError {}
+
+impl fmt::Display for ConversionError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ConversionError")
+    }
+}
+
+impl Error for ConversionError {}
+
+#[derive(Debug)]
+enum GeneralError {
+    LocalError(LocalError),
+    ExternalError(ExternalError),
+}
+
+impl From<LocalError> for GeneralError {
+    fn from(value: LocalError) -> Self {
+        GeneralError::LocalError(value)
+    }
+}
+
+impl From<ExternalError> for GeneralError {
+    fn from(value: ExternalError) -> Self {
+        GeneralError::ExternalError(value)
+    }
+}
+
+impl fmt::Display for GeneralError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "GeneralError")
+    }
+}
+
+impl Error for GeneralError {}
 
 async fn db_transaction<T>(
     callback: impl FnOnce(Transaction) -> Result<T, TransactionError>,
@@ -167,14 +227,14 @@ async fn create_ticket(order: Order) -> Result<TicketId, ExternalError> {
     execute_remote_service(order.order_id).await
 }
 
-async fn confirm_ticket((mut order, ticket_id): (Order, TicketId)) -> Result<Order, LocalError> {
+async fn confirm_ticket((mut order, ticket_id): (Order, TicketId)) -> Result<Order, ExternalError> {
     println!("confirm_ticket with {ticket_id}");
     db_transaction(|t| {
         order.ticket_id = ticket_id.into();
         Ok(order)
     })
     .await
-    .map_err(|_| LocalError {})
+    .map_err(|_| ExternalError {})
 }
 
 async fn send_ticket(order: Order) -> Result<EmailId, ExternalError> {
@@ -187,6 +247,7 @@ async fn execute_remote_service(id: Uuid) -> Result<Uuid, ExternalError> {
     Ok(Uuid::new_v4())
 }
 
+#[derive(Clone)]
 struct SagaOrderState {
     order: Order,
 }
@@ -217,8 +278,8 @@ fn create_from_ticket() -> SagaDefinition<SagaOrderState, Order, TicketId, Exter
         create_ticket,
         SagaOrderState::create_ticket,
     )
-    // .step(confirm_ticket, SagaOrderState::confirm_ticket)
-    // .step(send_ticket, SagaOrderState::send_ticket)
+    .step(confirm_ticket, SagaOrderState::confirm_ticket)
+    .step(send_ticket, SagaOrderState::send_ticket)
 }
 
 // fn create_all() -> SagaDefinition {
