@@ -103,32 +103,20 @@ impl<FactoryData: 'static, OperationResult: 'static> SagaDefinition1<FactoryData
         }
     }
 
-    fn new_future<Operation, NewResult>(name: &'static str, operation: Operation) -> Self
-    where
-        Operation: FnOnce(FactoryData) -> Pin<Box<dyn Future<Output = OperationResult>>> + 'static,
-    {
-        Self {
-            name,
-            operation: Box::new(operation),
-            // factory: Box::new(factory),
-        }
-    }
-
     fn step<NewResult: 'static, Factory, Operation, FactoryResult: 'static, NewFuture: 'static>(
         self,
         operation: Operation,
         factory: Factory,
-    ) -> SagaDefinition1<FactoryResult, NewFuture>
+    ) -> SagaDefinition1<FactoryData, NewFuture>
     where
         Operation: FnOnce(NewResult) -> Pin<Box<dyn Future<Output = NewFuture>>> + 'static,
-        Factory: FnOnce(FactoryResult) -> NewResult + 'static,
+        Factory: FnOnce(OperationResult) -> NewResult + 'static,
     {
-        SagaDefinition1::new(
-            self.name, operation,
-            factory,
+        SagaDefinition1 {
+            name: self.name,
             // combine(factory, operation),
-            // combine_f(self.operation, combine(factory, operation)),
-        )
+            operation: Box::new(combine_f(self.operation, combine(factory, operation))),
+        }
     }
 
     async fn run(self, data: FactoryData) -> OperationResult {
