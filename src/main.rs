@@ -103,7 +103,7 @@ impl<FactoryData: 'static, OperationResult: 'static> SagaDefinition1<FactoryData
         }
     }
 
-    fn step<NewResult: 'static, Factory, Operation, FactoryResult: 'static, NewFuture: 'static>(
+    fn step<NewResult: 'static, Factory, Operation, NewFuture: 'static>(
         self,
         operation: Operation,
         factory: Factory,
@@ -204,8 +204,12 @@ async fn ts() -> bool {
 fn create_retry_definition() -> SagaDefinition1<String, bool> {
     SagaDefinition1::new(
         "create_retry_definition",
-        move |a| Box::pin(ts()),
+        |a| Box::pin(async { update_external_data(a).await }),
         |data| "a".to_string(),
+    )
+    .step(
+        |a| Box::pin(async { update_external_data(a).await }),
+        |data| data.to_string(),
     )
 }
 
