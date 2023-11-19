@@ -1,11 +1,15 @@
 use std::{
+    collections::{BTreeMap, HashMap},
     error::Error,
     fmt,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
+use futures::future::BoxFuture;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tokio::{spawn, task::spawn_blocking};
 use uuid::Uuid;
 
 type OperationDefinition<State, In, OperationResult, E> = Box<
@@ -13,66 +17,172 @@ type OperationDefinition<State, In, OperationResult, E> = Box<
         In,
     ) -> (
         State,
-        Pin<Box<dyn Future<Output = Result<OperationResult, E>>>>,
+        Pin<Box<dyn Future<Output = Result<OperationResult, E>> + Send>>,
     ),
 >;
 
-struct SagaDefinition<State, In, OperationResult, E> {
-    name: &'static str,
-    operation: OperationDefinition<State, In, OperationResult, E>,
+#[derive(Debug, Clone)]
+struct Saga {
+    pub id: Uuid,
+    pub states: BTreeMap<u8, String>,
 }
 
-impl<State: Clone + 'static, FactoryData: 'static, OperationResult: 'static, WrappingError>
-    SagaDefinition<State, FactoryData, OperationResult, WrappingError>
+impl Saga {
+    pub fn new(id: Uuid) -> Self {
+        Self {
+            id,
+            states: Default::default(),
+        }
+    }
+    pub fn last_step(&self) -> u8 {
+        self.states.last_key_value().map(|(k, _)| *k).unwrap_or(0)
+    }
+}
+
+trait DefinitionPersister {
+    fn retrieve(&self, id: Uuid) -> Result<Saga, String>;
+    fn store(&mut self, saga: Saga) -> Result<(), String>;
+}
+
+#[derive(Debug, Default)]
+struct InMemoryPersister {
+    sagas: HashMap<Uuid, Saga>,
+}
+
+impl DefinitionPersister for InMemoryPersister {
+    fn retrieve(&self, id: Uuid) -> Result<Saga, String> {
+        self.sagas
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| "Not found".to_string())
+    }
+
+    fn store(&mut self, saga: Saga) -> Result<(), String> {
+        self.sagas.insert(saga.id, saga);
+        Ok(())
+    }
+}
+
+struct SagaDefinition<State, In, OperationResult, E, Persister> {
+    name: &'static str,
+    id: Uuid,
+    step: u8,
+    operation: OperationDefinition<Arc<State>, In, OperationResult, E>,
+    persister: Arc<Mutex<Persister>>,
+    existing_saga: Arc<RwLock<Saga>>,
+}
+
+impl<
+        State: 'static + Send + Sync,
+        FactoryData: 'static + Send,
+        OperationResult: 'static + Send,
+        WrappingError: 'static + Send,
+        Persister: 'static + Send,
+    > SagaDefinition<State, FactoryData, OperationResult, WrappingError, Persister>
 {
     fn new<StateCreator>(
         name: &'static str,
+        id: Uuid,
         state: StateCreator,
         initial_data: OperationResult,
+        persister: Arc<Mutex<Persister>>,
     ) -> Self
     where
-        StateCreator: FnOnce(FactoryData) -> State + 'static,
+        Persister: DefinitionPersister + Send,
+        StateCreator: FnOnce(FactoryData) -> State + Send + 'static,
     {
+        let step = 0;
         Self {
             name,
+            id,
+            step,
+            existing_saga: Arc::new(RwLock::new(Saga::new(id))),
             operation: Box::new(|fd| {
                 let s = state(fd);
                 let f = Box::pin(async move { Result::<_, WrappingError>::Ok(initial_data) });
-                (s, f)
+                (Arc::new(s), f)
             }),
+            persister,
         }
     }
 
-    fn step<NewError, F, FactoryResult: 'static, Factory, Operation, NewFutureResult: 'static>(
+    fn step<
+        NewError,
+        F,
+        FactoryResult: Send + 'static,
+        Factory,
+        Operation,
+        NewFutureResult: 'static,
+    >(
         self,
         operation: Operation,
         factory: Factory,
-    ) -> SagaDefinition<State, FactoryData, NewFutureResult, WrappingError>
+    ) -> SagaDefinition<State, FactoryData, NewFutureResult, WrappingError, Persister>
     where
-        Operation: FnOnce(FactoryResult) -> F + 'static,
-        Factory: FnOnce(&State, OperationResult) -> FactoryResult + 'static,
-        F: Future<Output = Result<NewFutureResult, NewError>> + 'static,
-        WrappingError: Error + From<NewError> + 'static,
+        Operation: FnOnce(FactoryResult) -> F + Send + 'static,
+        Factory: FnOnce(&State, OperationResult) -> FactoryResult + Send + 'static,
+        F: Future<Output = Result<NewFutureResult, NewError>> + Send + 'static,
+        WrappingError: Error + From<NewError> + From<serde_json::Error> + Send + 'static,
+        NewFutureResult: Serialize + DeserializeOwned + Send,
+        Persister: DefinitionPersister + Send + 'static,
     {
         let previous = self.operation;
+        let persister = self.persister.clone();
+        let definition_step = self.step + 1;
+        let existing_saga = self.existing_saga.clone();
         SagaDefinition {
             name: self.name,
-            operation: Box::new(|d| {
-                let (prs, prf) = previous(d);
-                let s = prs.clone();
+            id: self.id,
+            step: definition_step,
+            existing_saga: self.existing_saga.clone(),
+            operation: Box::new(move |d| {
+                let (current_state, previous_executing) = previous(d);
+
+                let s = current_state.clone();
                 let f = Box::pin(async move {
-                    let prd = prf.await;
-                    let ns = factory(&s, prd?);
-                    operation(ns).await.map_err(WrappingError::from)
+                    let operation_result = previous_executing.await?;
+                    let existing_state = {
+                        existing_saga
+                            .read()
+                            .unwrap()
+                            .states
+                            .get(&definition_step)
+                            .map(|s| serde_json::from_str(s))
+                    };
+                    if let Some(new_operation_result) = existing_state {
+                        new_operation_result.map_err(WrappingError::from)
+                    } else {
+                        let factory_result = factory(&s, operation_result);
+
+                        let new_operation_result =
+                            operation(factory_result).await.map_err(WrappingError::from);
+
+                        if let Ok(r) = &new_operation_result {
+                            let state = serde_json::to_string(r).unwrap();
+                            let mut saga = existing_saga.write().unwrap();
+                            saga.states.insert(definition_step, state);
+                            persister.lock().unwrap().store(saga.clone()).unwrap();
+                        }
+                        new_operation_result
+                    }
                 });
-                (prs, f)
+                (current_state, f)
             }),
+            persister: self.persister,
         }
     }
 
-    async fn run(self, data: FactoryData) -> Result<OperationResult, WrappingError> {
+    async fn run(self, data: FactoryData) -> Result<OperationResult, WrappingError>
+    where
+        Persister: DefinitionPersister + Send,
+        OperationResult: Send,
+        WrappingError: Send,
+    {
+        if let Ok(saga) = self.persister.lock().unwrap().retrieve(self.id) {
+            *self.existing_saga.write().unwrap() = saga;
+        }
         let (_state, f) = (self.operation)(data);
-        f.await
+        spawn(f).await.unwrap()
     }
 }
 
@@ -127,6 +237,7 @@ impl Error for ConversionError {}
 enum GeneralError {
     LocalError(LocalError),
     ExternalError(ExternalError),
+    SerializiationError(serde_json::Error),
 }
 
 impl From<LocalError> for GeneralError {
@@ -138,6 +249,12 @@ impl From<LocalError> for GeneralError {
 impl From<ExternalError> for GeneralError {
     fn from(value: ExternalError) -> Self {
         GeneralError::ExternalError(value)
+    }
+}
+
+impl From<serde_json::Error> for GeneralError {
+    fn from(value: serde_json::Error) -> Self {
+        GeneralError::SerializiationError(value)
     }
 }
 
@@ -165,7 +282,7 @@ type OrderId = Uuid;
 type TicketId = Uuid;
 type EmailId = Uuid;
 
-#[derive(Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Order {
     order_id: OrderId,
     ticket_id: Option<TicketId>,
@@ -188,14 +305,28 @@ async fn create_ticket(order: Order) -> Result<TicketId, ExternalError> {
     execute_remote_service(order.order_id).await
 }
 
-async fn confirm_ticket((mut order, ticket_id): (Order, TicketId)) -> Result<Order, LocalError> {
-    println!("confirm_ticket with {ticket_id}");
-    db_transaction(|_t| {
-        order.ticket_id = ticket_id.into();
-        Ok(order)
-    })
-    .await
-    .map_err(|_| LocalError {})
+struct TickeConfirmator {
+    success: bool,
+}
+
+impl TickeConfirmator {
+    async fn confirm_ticket(
+        &self,
+        mut order: Order,
+        ticket_id: TicketId,
+    ) -> Result<Order, LocalError> {
+        println!("confirm_ticket with {ticket_id}");
+        if self.success {
+            db_transaction(|_t| {
+                order.ticket_id = ticket_id.into();
+                Ok(order)
+            })
+            .await
+            .map_err(|_| LocalError {})
+        } else {
+            Err(LocalError {})
+        }
+    }
 }
 
 async fn send_ticket(order: Order) -> Result<EmailId, ExternalError> {
@@ -208,7 +339,7 @@ async fn execute_remote_service(id: Uuid) -> Result<Uuid, ExternalError> {
     Ok(Uuid::new_v4())
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct SagaOrderState {
     order: Order,
 }
@@ -261,34 +392,63 @@ impl SagaFullOrderState {
     }
 }
 
-fn create_from_existing_order() -> SagaDefinition<SagaOrderState, Order, TicketId, GeneralError> {
-    SagaDefinition::new("create_from_ticket", SagaOrderState::new, ())
-        .step(create_ticket, SagaOrderState::create_ticket)
-        .step(confirm_ticket, SagaOrderState::confirm_ticket)
-        .step(send_ticket, SagaOrderState::send_ticket)
+fn create_from_existing_order<P>(
+    persister: Arc<Mutex<P>>,
+    order_id: Uuid,
+    success: bool,
+) -> SagaDefinition<SagaOrderState, Order, TicketId, GeneralError, P>
+where
+    P: DefinitionPersister + 'static + Send,
+{
+    let ticker_confirmator = TickeConfirmator { success };
+    SagaDefinition::new(
+        "create_from_ticket",
+        order_id,
+        SagaOrderState::new,
+        (),
+        persister,
+    )
+    .step(create_ticket, SagaOrderState::create_ticket)
+    .step(
+        |(o, t)| async move { ticker_confirmator.confirm_ticket(o, t).await },
+        SagaOrderState::confirm_ticket,
+    )
+    .step(send_ticket, SagaOrderState::send_ticket)
 }
 
-fn create_full_order() -> SagaDefinition<SagaFullOrderState, Option<Order>, TicketId, GeneralError>
+fn create_full_order<P>(
+    persister: Arc<Mutex<P>>,
+    success: bool,
+) -> SagaDefinition<SagaFullOrderState, Option<Order>, TicketId, GeneralError, P>
+where
+    P: DefinitionPersister + 'static + Send,
 {
+    let ticket_confirmator = TickeConfirmator { success };
     SagaDefinition::new(
         "create_from_existing_order",
+        Uuid::new_v4(),
         SagaFullOrderState::new,
         OrderId::new_v4(),
+        persister,
     )
     .step(create_order, SagaFullOrderState::generate_order_id)
     .step(
         create_ticket,
         SagaFullOrderState::set_order_and_create_ticket,
     )
-    .step(confirm_ticket, SagaFullOrderState::confirm_ticket)
+    .step(
+        |(o, t)| async move { ticket_confirmator.confirm_ticket(o, t).await },
+        SagaFullOrderState::confirm_ticket,
+    )
     .step(send_ticket, SagaFullOrderState::send_ticket)
 }
 
 #[tokio::main]
 async fn main() {
+    let persister = Arc::new(Mutex::new(InMemoryPersister::default()));
     let order_id = OrderId::new_v4();
     // operation will run as long as transaction completes even if the server crashes
-    let definition = create_from_existing_order();
+    let definition = create_from_existing_order(persister.clone(), order_id, false);
     // must complete
     let order = db_transaction(|_t| {
         Ok(Order {
@@ -299,13 +459,17 @@ async fn main() {
     })
     .await
     .unwrap();
-    let r: EmailId = definition.run(order).await.unwrap();
-    println!("Received email {r}");
+    let r: Result<EmailId, GeneralError> = definition.run(order.clone()).await;
+    println!("Received email {r:?}");
+
+    let definition = create_from_existing_order(persister.clone(), order_id, true);
+    let r: Result<EmailId, GeneralError> = definition.run(order).await;
+    println!("Received email {r:?}");
 
     // operations will run one after another, will not rerun in case of a crash
-    let definition = create_full_order();
-    let r: EmailId = definition.run(None).await.unwrap();
-    println!("Received email {r}");
+    // let definition = create_full_order(persister.clone());
+    // let r: EmailId = definition.run(None).await.unwrap();
+    // println!("Received email {r}");
 
     // let order = Order {};
     // let ticket = 1;
