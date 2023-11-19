@@ -46,7 +46,7 @@ impl<
         Persister: DefinitionPersister + Clone + Send,
         StateCreator: FnOnce(FactoryData) -> State + Send + 'static,
         FactoryData: Serialize,
-        WrappingError: From<serde_json::Error> + From<PersistError>,
+        WrappingError: From<PersistError>,
     {
         let existing_saga = Arc::new(RwLock::new(Saga::new(lock_scope.id)));
         let step = 0;
@@ -57,7 +57,9 @@ impl<
             existing_saga: existing_saga.clone(),
             operation: Box::new(move |fd| {
                 let persist_callback = |fd| {
-                    let initial_state = serde_json::to_string(&fd).map_err(WrappingError::from)?;
+                    let initial_state = serde_json::to_string(&fd)
+                        .map_err(PersistError::from)
+                        .map_err(WrappingError::from)?;
                     let mut saga = existing_saga.write().expect("existing saga");
                     saga.states.insert(step, initial_state);
                     persist.store(saga.clone()).map_err(WrappingError::from)?;
@@ -89,8 +91,7 @@ impl<
         Operation: FnOnce(FactoryResult) -> F + Send + 'static,
         Factory: FnOnce(&State, OperationResult) -> FactoryResult + Send + 'static,
         F: Future<Output = Result<NewFutureResult, NewError>> + Send + 'static,
-        WrappingError:
-            Error + From<NewError> + From<serde_json::Error> + From<PersistError> + Send + 'static,
+        WrappingError: Error + From<NewError> + From<PersistError> + Send + 'static,
         NewFutureResult: Serialize + DeserializeOwned + Send,
         Persister: DefinitionPersister + Clone + Send + 'static,
     {
@@ -119,13 +120,17 @@ impl<
                     };
 
                     if let Some(new_operation_result) = existing_state {
-                        new_operation_result.map_err(WrappingError::from)
+                        new_operation_result
+                            .map_err(PersistError::from)
+                            .map_err(WrappingError::from)
                     } else {
                         let new_operation_result =
                             operation(factory_result).await.map_err(WrappingError::from);
 
                         if let Ok(r) = &new_operation_result {
-                            let state = serde_json::to_string(r).map_err(WrappingError::from)?;
+                            let state = serde_json::to_string(r)
+                                .map_err(PersistError::from)
+                                .map_err(WrappingError::from)?;
                             let mut saga = existing_saga.write().expect("existing saga");
                             saga.states.insert(definition_step, state);
                             persister.store(saga.clone()).map_err(WrappingError::from)?;

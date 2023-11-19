@@ -53,6 +53,7 @@ pub enum LockType {
 pub enum PersistError {
     Locked,
     NotFound,
+    Serialization(serde_json::Error),
 }
 
 impl fmt::Display for PersistError {
@@ -60,7 +61,14 @@ impl fmt::Display for PersistError {
         match self {
             Self::Locked => write!(f, "Failed to persist: Locked"),
             Self::NotFound => write!(f, "Failed to persist: NotFound"),
+            Self::Serialization(e) => write!(f, "Failed to serialize: {e}"),
         }
+    }
+}
+
+impl From<serde_json::Error> for PersistError {
+    fn from(value: serde_json::Error) -> Self {
+        PersistError::Serialization(value)
     }
 }
 
