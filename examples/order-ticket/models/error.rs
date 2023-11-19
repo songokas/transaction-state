@@ -17,39 +17,44 @@ impl Error for LocalError {}
 
 #[derive(Debug)]
 pub enum GeneralError {
-    LocalError(LocalError),
-    ExternalError(ExternalError),
-    SerializiationError(serde_json::Error),
-    PersistError(PersistError),
+    Local(LocalError),
+    External(ExternalError),
+    Serializiation(serde_json::Error),
+    Persist(PersistError),
 }
 
 impl From<LocalError> for GeneralError {
     fn from(value: LocalError) -> Self {
-        GeneralError::LocalError(value)
+        GeneralError::Local(value)
     }
 }
 
 impl From<ExternalError> for GeneralError {
     fn from(value: ExternalError) -> Self {
-        GeneralError::ExternalError(value)
+        GeneralError::External(value)
     }
 }
 
 impl From<serde_json::Error> for GeneralError {
     fn from(value: serde_json::Error) -> Self {
-        GeneralError::SerializiationError(value)
+        GeneralError::Serializiation(value)
     }
 }
 
 impl From<PersistError> for GeneralError {
     fn from(value: PersistError) -> Self {
-        GeneralError::PersistError(value)
+        GeneralError::Persist(value)
     }
 }
 
 impl fmt::Display for GeneralError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "GeneralError")
+        match self {
+            GeneralError::External(e) => write!(f, "{e}"),
+            GeneralError::Local(e) => write!(f, "{e}"),
+            GeneralError::Serializiation(e) => write!(f, "{e}"),
+            GeneralError::Persist(e) => write!(f, "{e}"),
+        }
     }
 }
 

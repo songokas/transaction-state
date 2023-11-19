@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use definitions::existing_order::create_from_existing_order;
+use definitions::{existing_order::create_from_existing_order, full_order::create_full_order};
 use models::order::OrderId;
 use resumer::run_resumer;
 use services::db_transaction::TransactionError;
@@ -12,7 +12,6 @@ use transaction_state::persisters::{in_memory::InMemoryPersister, persister::Def
 use uuid::Uuid;
 
 use crate::{
-    definitions::full_order::create_full_order,
     models::{email::EmailId, error::GeneralError, order::Order},
     services::db_transaction::start_transaction,
 };
@@ -42,7 +41,7 @@ async fn main() {
         let order_id = OrderId::new_v4();
         // operation will run as long as transaction completes even if the server crashes
         let definition =
-            create_from_existing_order(persister.clone(), order_id, false, Uuid::new_v4());
+            create_from_existing_order(persister.clone(), order_id, rand::random(), Uuid::new_v4());
         let lock_scope = definition.lock_scope.clone();
 
         // must complete
@@ -67,12 +66,16 @@ async fn main() {
         });
 
         // operations will run one after another, will not rerun in case of a crash
-        // let definition =
-        //     create_full_order(persister.clone(), OrderId::new_v4(), true, Uuid::new_v4());
-        // spawn(async move {
-        //     let r: EmailId = definition.run(None).await.unwrap();
-        //     println!("Received email {r}");
-        // });
+        let definition = create_full_order(
+            persister.clone(),
+            OrderId::new_v4(),
+            rand::random(),
+            Uuid::new_v4(),
+        );
+        spawn(async move {
+            let r: Result<EmailId, GeneralError> = definition.run(None).await;
+            println!("Received email {r:?}");
+        });
     }
 
     runner.await.unwrap();

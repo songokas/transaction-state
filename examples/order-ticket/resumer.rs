@@ -13,7 +13,7 @@ pub async fn run_resumer<P>(
     restart_with_duration: Duration,
     sleep_when_empty: Duration,
 ) where
-    P: DefinitionPersister + Send + 'static,
+    P: DefinitionPersister + std::fmt::Debug + Send + 'static,
 {
     loop {
         let failed = {

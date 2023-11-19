@@ -36,6 +36,8 @@ impl DefinitionPersister for InMemoryPersister {
     fn lock(&mut self, scope: LockScope, lock_type: LockType) -> Result<(), PersistError> {
         let insert = if let Some(context) = self.locks.get(&scope.id) {
             scope.executor_id == context.executor_id
+                || matches!(context.lock_type, LockType::Failed)
+                || context.instant_started.elapsed() > Duration::from_secs(5)
         } else {
             true
         };
@@ -66,9 +68,8 @@ impl DefinitionPersister for InMemoryPersister {
             .iter()
             .find(|(_, context)| match context.lock_type {
                 LockType::Failed => true,
-                LockType::Initial if context.instant_started.elapsed() > duration => true,
-                LockType::Retry if context.instant_started.elapsed() > duration => true,
-                _ => false,
+                LockType::Finished => false,
+                _ => context.instant_started.elapsed() > duration,
             })
             .map(|(key, context)| LockScope {
                 id: *key,

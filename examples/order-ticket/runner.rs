@@ -23,16 +23,16 @@ where
     match name.as_str() {
         "create_from_existing_order" => {
             let c = create_from_existing_order(persister, id, true, executor_id);
-            let r: EmailId = c.continue_from_last_step().await?;
-            println!("Retried email {r}");
+            let r: Result<EmailId, GeneralError> = c.continue_from_last_step().await;
+            println!("Retried email {r:?}");
             Ok(())
         }
         "create_full_order" => {
-            let r: EmailId = {
+            let r: Result<EmailId, GeneralError> = {
                 let a = create_full_order(persister, id, true, executor_id);
-                a.continue_from_last_step().await?
+                a.continue_from_last_step().await
             };
-            println!("Retried email {r}");
+            println!("Retried email {r:?}");
             Ok(())
         }
         _ => Err(LocalError {}.into()),

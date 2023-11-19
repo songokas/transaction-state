@@ -6,7 +6,6 @@ use std::{
 };
 
 use serde::{de::DeserializeOwned, Serialize};
-use uuid::Uuid;
 
 use crate::persisters::persister::{DefinitionPersister, LockScope, LockType, PersistError};
 
