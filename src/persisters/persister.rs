@@ -6,15 +6,18 @@ use uuid::Uuid;
 use crate::definitions::saga::Saga;
 
 pub trait DefinitionPersister {
-    fn lock(&mut self, scope: LockScope, lock_type: LockType) -> Result<(), PersistError>;
+    fn lock(&self, scope: LockScope, lock_type: LockType) -> Result<(), PersistError>;
     fn retrieve(&self, id: Uuid) -> Result<Saga, PersistError>;
-    fn store(&mut self, saga: Saga) -> Result<(), PersistError>;
+    fn store(&self, saga: Saga) -> Result<(), PersistError>;
     fn get_next_failed(
-        &mut self,
+        &self,
         for_duration: Duration,
     ) -> Result<Option<(Uuid, String, Uuid)>, PersistError>;
+}
+
+pub trait InitialDataPersister {
     fn save_initial_state<S: Serialize>(
-        &mut self,
+        &self,
         scope: LockScope,
         state: &S,
     ) -> Result<(), PersistError>;

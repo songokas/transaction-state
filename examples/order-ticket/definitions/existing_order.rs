@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 use transaction_state::{
     definitions::saga_definition::SagaDefinition,
     persisters::persister::{DefinitionPersister, LockScope},
@@ -12,15 +10,12 @@ use crate::{
     states::existing_order::SagaOrderState,
 };
 
-pub fn create_from_existing_order<P>(
-    persister: Arc<Mutex<P>>,
+pub fn create_from_existing_order<P: DefinitionPersister + Clone + Send + 'static>(
+    persister: P,
     order_id: Uuid,
     success: bool,
     executor_id: Uuid,
-) -> SagaDefinition<SagaOrderState, Order, TicketId, GeneralError, P>
-where
-    P: DefinitionPersister + 'static + Send,
-{
+) -> SagaDefinition<SagaOrderState, Order, TicketId, GeneralError, P> {
     let ticker_confirmator = TickeConfirmator { success };
     SagaDefinition::new(
         LockScope {

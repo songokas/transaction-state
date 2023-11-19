@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 use transaction_state::{
     definitions::saga_definition::SagaDefinition,
     persisters::persister::{DefinitionPersister, LockScope},
@@ -19,15 +17,12 @@ use crate::{
     states::full_order::SagaFullOrderState,
 };
 
-pub fn create_full_order<P>(
-    persister: Arc<Mutex<P>>,
+pub fn create_full_order<P: DefinitionPersister + Clone + Send + 'static>(
+    persister: P,
     id: Uuid,
     success: bool,
     executor_id: Uuid,
-) -> SagaDefinition<SagaFullOrderState, Option<Order>, TicketId, GeneralError, P>
-where
-    P: DefinitionPersister + 'static + Send,
-{
+) -> SagaDefinition<SagaFullOrderState, Option<Order>, TicketId, GeneralError, P> {
     let ticket_confirmator = TickeConfirmator { success };
     SagaDefinition::new(
         LockScope {

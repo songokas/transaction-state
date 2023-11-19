@@ -2,7 +2,7 @@ use std::{
     error::Error,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 
 use serde::{de::DeserializeOwned, Serialize};
@@ -24,7 +24,7 @@ pub struct SagaDefinition<State, In, OperationResult, E, Persister> {
     pub lock_scope: LockScope,
     step: u8,
     operation: OperationDefinition<Arc<State>, In, OperationResult, E>,
-    persister: Arc<Mutex<Persister>>,
+    persister: Persister,
     existing_saga: Arc<RwLock<Saga>>,
 }
 
@@ -40,10 +40,10 @@ impl<
         lock_scope: LockScope,
         state: StateCreator,
         initial_data: OperationResult,
-        persister: Arc<Mutex<Persister>>,
+        persister: Persister,
     ) -> Self
     where
-        Persister: DefinitionPersister + Send,
+        Persister: DefinitionPersister + Clone + Send,
         StateCreator: FnOnce(FactoryData) -> State + Send + 'static,
         FactoryData: Serialize,
         WrappingError: From<serde_json::Error> + From<PersistError>,
@@ -60,11 +60,7 @@ impl<
                     let initial_state = serde_json::to_string(&fd).map_err(WrappingError::from)?;
                     let mut saga = existing_saga.write().expect("existing saga");
                     saga.states.insert(step, initial_state);
-                    persist
-                        .lock()
-                        .expect("persister")
-                        .store(saga.clone())
-                        .map_err(WrappingError::from)?;
+                    persist.store(saga.clone()).map_err(WrappingError::from)?;
                     Ok(())
                 };
 
@@ -96,7 +92,7 @@ impl<
         WrappingError:
             Error + From<NewError> + From<serde_json::Error> + From<PersistError> + Send + 'static,
         NewFutureResult: Serialize + DeserializeOwned + Send,
-        Persister: DefinitionPersister + Send + 'static,
+        Persister: DefinitionPersister + Clone + Send + 'static,
     {
         let previous = self.operation;
         let persister = self.persister.clone();
@@ -112,6 +108,7 @@ impl<
                 let s = current_state.clone();
                 let f = Box::pin(async move {
                     let operation_result = previous_executing.await?;
+                    let factory_result = factory(&s, operation_result);
                     let existing_state = {
                         existing_saga
                             .read()
@@ -120,23 +117,18 @@ impl<
                             .get(&definition_step)
                             .map(|s| serde_json::from_str(s))
                     };
+
                     if let Some(new_operation_result) = existing_state {
                         new_operation_result.map_err(WrappingError::from)
                     } else {
-                        let factory_result = factory(&s, operation_result);
-
                         let new_operation_result =
                             operation(factory_result).await.map_err(WrappingError::from);
 
                         if let Ok(r) = &new_operation_result {
-                            let state = serde_json::to_string(r).unwrap();
+                            let state = serde_json::to_string(r).map_err(WrappingError::from)?;
                             let mut saga = existing_saga.write().expect("existing saga");
                             saga.states.insert(definition_step, state);
-                            persister
-                                .lock()
-                                .expect("store persister")
-                                .store(saga.clone())
-                                .map_err(WrappingError::from)?;
+                            persister.store(saga.clone()).map_err(WrappingError::from)?;
                         }
                         new_operation_result
                     }
@@ -155,21 +147,14 @@ impl<
         FactoryData: Send,
     {
         let lock_scope = self.lock_scope;
-        let saga = {
-            let mut p = self.persister.lock().expect("persister lock");
-            p.lock(lock_scope.clone(), LockType::Executing)
-                .map_err(WrappingError::from)?;
-            p.retrieve(lock_scope.id).map_err(WrappingError::from)?
-        };
-
-        *self.existing_saga.write().expect("saga lock") = saga;
+        self.persister
+            .lock(lock_scope.clone(), LockType::Executing)
+            .map_err(WrappingError::from)?;
 
         let (_state, f) = (self.operation)(data);
         let result = f.await;
 
         self.persister
-            .lock()
-            .expect("persister lock")
             .lock(
                 lock_scope,
                 if result.is_ok() {
@@ -191,10 +176,12 @@ impl<
     {
         let lock_scope = self.lock_scope;
         let saga = {
-            let mut p = self.persister.lock().expect("persister lock");
-            p.lock(lock_scope.clone(), LockType::Executing)
+            self.persister
+                .lock(lock_scope.clone(), LockType::Executing)
                 .map_err(WrappingError::from)?;
-            p.retrieve(lock_scope.id).map_err(WrappingError::from)?
+            self.persister
+                .retrieve(lock_scope.id)
+                .map_err(WrappingError::from)?
         };
 
         let state = saga.states.get(&0).ok_or(PersistError::NotFound)?;
@@ -205,8 +192,6 @@ impl<
         let result = f.await;
 
         self.persister
-            .lock()
-            .expect("persister lock")
             .lock(
                 lock_scope,
                 if result.is_ok() {

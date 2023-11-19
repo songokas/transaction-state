@@ -1,14 +1,13 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
 use definitions::{existing_order::create_from_existing_order, full_order::create_full_order};
 use models::order::OrderId;
 use resumer::run_resumer;
 use services::db_transaction::TransactionError;
 use tokio::spawn;
-use transaction_state::persisters::{in_memory::InMemoryPersister, persister::DefinitionPersister};
+use transaction_state::persisters::{
+    in_memory::InMemoryPersister, persister::InitialDataPersister,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -29,7 +28,7 @@ mod states;
 // send ticket by mail - external service
 #[tokio::main]
 async fn main() {
-    let persister = Arc::new(Mutex::new(InMemoryPersister::default()));
+    let persister = InMemoryPersister::new(Duration::from_secs(5));
 
     let runner = spawn(run_resumer(
         persister.clone(),
@@ -51,8 +50,6 @@ async fn main() {
                 ticket_id: None,
             };
             persister
-                .lock()
-                .expect("persister lock")
                 .save_initial_state(lock_scope, &order)
                 .map_err(|_| TransactionError {})?;
             Ok(order)

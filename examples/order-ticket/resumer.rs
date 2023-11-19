@@ -1,25 +1,18 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
 use tokio::{spawn, time::sleep};
 use transaction_state::persisters::persister::DefinitionPersister;
 
 use crate::runner::run_definition;
 
-pub async fn run_resumer<P>(
-    persister: Arc<Mutex<P>>,
+pub async fn run_resumer<P: DefinitionPersister + Clone + Send + 'static>(
+    persister: P,
     restart_with_duration: Duration,
     sleep_when_empty: Duration,
-) where
-    P: DefinitionPersister + std::fmt::Debug + Send + 'static,
-{
+) {
     loop {
         let failed = {
             persister
-                .lock()
-                .expect("persister lock")
                 .get_next_failed(restart_with_duration)
                 .ok()
                 .flatten()
