@@ -16,46 +16,38 @@ impl fmt::Display for LocalError {
 impl Error for LocalError {}
 
 #[derive(Debug)]
-pub enum GeneralError {
+pub enum DefinitionExecutionError {
     Local(LocalError),
     External(ExternalError),
-    Serializiation(serde_json::Error),
     Persist(PersistError),
 }
 
-impl From<LocalError> for GeneralError {
+impl From<LocalError> for DefinitionExecutionError {
     fn from(value: LocalError) -> Self {
-        GeneralError::Local(value)
+        DefinitionExecutionError::Local(value)
     }
 }
 
-impl From<ExternalError> for GeneralError {
+impl From<ExternalError> for DefinitionExecutionError {
     fn from(value: ExternalError) -> Self {
-        GeneralError::External(value)
+        DefinitionExecutionError::External(value)
     }
 }
 
-impl From<serde_json::Error> for GeneralError {
-    fn from(value: serde_json::Error) -> Self {
-        GeneralError::Serializiation(value)
-    }
-}
-
-impl From<PersistError> for GeneralError {
+impl From<PersistError> for DefinitionExecutionError {
     fn from(value: PersistError) -> Self {
-        GeneralError::Persist(value)
+        DefinitionExecutionError::Persist(value)
     }
 }
 
-impl fmt::Display for GeneralError {
+impl fmt::Display for DefinitionExecutionError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            GeneralError::External(e) => write!(f, "{e}"),
-            GeneralError::Local(e) => write!(f, "{e}"),
-            GeneralError::Serializiation(e) => write!(f, "{e}"),
-            GeneralError::Persist(e) => write!(f, "{e}"),
+            DefinitionExecutionError::External(e) => write!(f, "Definition execution failed: {e}"),
+            DefinitionExecutionError::Local(e) => write!(f, "Definition execution failed: {e}"),
+            DefinitionExecutionError::Persist(e) => write!(f, "Definition execution failed: {e}"),
         }
     }
 }
 
-impl Error for GeneralError {}
+impl Error for DefinitionExecutionError {}

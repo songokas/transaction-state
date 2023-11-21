@@ -1,12 +1,13 @@
 use transaction_state::{
+    curry2,
     definitions::saga_definition::SagaDefinition,
-    persisters::persister::{DefinitionPersister, LockScope},
+    persisters::persister::{LockScope, StepPersister},
 };
 use uuid::Uuid;
 
 use crate::{
     models::{
-        error::GeneralError,
+        error::DefinitionExecutionError,
         order::{Order, OrderId},
         ticket::TicketId,
     },
@@ -17,12 +18,12 @@ use crate::{
     states::full_order::SagaFullOrderState,
 };
 
-pub fn create_full_order<P: DefinitionPersister + Clone + Send + 'static>(
+pub fn create_full_order<P: StepPersister>(
     persister: P,
     id: Uuid,
     success: bool,
     executor_id: Uuid,
-) -> SagaDefinition<SagaFullOrderState, Option<Order>, TicketId, GeneralError, P> {
+) -> SagaDefinition<SagaFullOrderState, Option<Order>, TicketId, DefinitionExecutionError, P> {
     let ticket_confirmator = TickeConfirmator { success };
     SagaDefinition::new(
         LockScope {
@@ -40,7 +41,7 @@ pub fn create_full_order<P: DefinitionPersister + Clone + Send + 'static>(
         SagaFullOrderState::set_order_and_create_ticket,
     )
     .step(
-        |(o, t)| async move { ticket_confirmator.confirm_ticket(o, t).await },
+        curry2!(TickeConfirmator::confirm_ticket, ticket_confirmator),
         SagaFullOrderState::confirm_ticket,
     )
     .step(send_ticket, SagaFullOrderState::send_ticket)

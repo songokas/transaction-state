@@ -5,18 +5,21 @@ use uuid::Uuid;
 
 use crate::definitions::saga::Saga;
 
-pub trait DefinitionPersister {
-    fn lock(&self, scope: LockScope, lock_type: LockType) -> Result<(), PersistError>;
-    fn retrieve(&self, id: Uuid) -> Result<Saga, PersistError>;
-    fn store(&self, saga: Saga) -> Result<(), PersistError>;
-    fn get_next_failed(
+#[async_trait::async_trait]
+pub trait StepPersister: Clone + Send + Sync + 'static {
+    async fn lock(&self, scope: LockScope, lock_type: LockType) -> Result<(), PersistError>;
+    async fn retrieve(&self, id: Uuid) -> Result<Saga, PersistError>;
+    async fn store(&self, id: Uuid, step: u8, state: String) -> Result<(), PersistError>;
+    async fn get_next_failed(
         &self,
         for_duration: Duration,
     ) -> Result<Option<(Uuid, String, Uuid)>, PersistError>;
 }
 
+// persist data before running while in transaction
+#[async_trait::async_trait]
 pub trait InitialDataPersister {
-    fn save_initial_state<S: Serialize>(
+    async fn save_initial_state<S: Serialize + Sync>(
         &self,
         scope: LockScope,
         state: &S,
@@ -54,14 +57,16 @@ pub enum PersistError {
     Locked,
     NotFound,
     Serialization(serde_json::Error),
+    Execution(String, String),
 }
 
 impl fmt::Display for PersistError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::Locked => write!(f, "Failed to persist: Locked"),
-            Self::NotFound => write!(f, "Failed to persist: NotFound"),
+            Self::Locked => write!(f, "Record is locked"),
+            Self::NotFound => write!(f, "Record not found"),
             Self::Serialization(e) => write!(f, "Failed to serialize: {e}"),
+            Self::Execution(e, c) => write!(f, "Failed to execute {c}: {e}"),
         }
     }
 }

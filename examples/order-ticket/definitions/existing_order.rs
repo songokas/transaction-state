@@ -1,22 +1,23 @@
+use transaction_state::curry2;
 use transaction_state::{
     definitions::saga_definition::SagaDefinition,
-    persisters::persister::{DefinitionPersister, LockScope},
+    persisters::persister::{LockScope, StepPersister},
 };
 use uuid::Uuid;
 
 use crate::{
-    models::{error::GeneralError, order::Order, ticket::TicketId},
+    models::{error::DefinitionExecutionError, order::Order, ticket::TicketId},
     services::ticket::{create_ticket, send_ticket, TickeConfirmator},
     states::existing_order::SagaOrderState,
 };
 
-pub fn create_from_existing_order<P: DefinitionPersister + Clone + Send + 'static>(
+pub fn create_from_existing_order<P: StepPersister>(
     persister: P,
     order_id: Uuid,
     success: bool,
     executor_id: Uuid,
-) -> SagaDefinition<SagaOrderState, Order, TicketId, GeneralError, P> {
-    let ticker_confirmator = TickeConfirmator { success };
+) -> SagaDefinition<SagaOrderState, Order, TicketId, DefinitionExecutionError, P> {
+    let ticket_confirmator = TickeConfirmator { success };
     SagaDefinition::new(
         LockScope {
             id: order_id,
@@ -29,7 +30,7 @@ pub fn create_from_existing_order<P: DefinitionPersister + Clone + Send + 'stati
     )
     .step(create_ticket, SagaOrderState::create_ticket)
     .step(
-        |(o, t)| async move { ticker_confirmator.confirm_ticket(o, t).await },
+        curry2!(TickeConfirmator::confirm_ticket, ticket_confirmator),
         SagaOrderState::confirm_ticket,
     )
     .step(send_ticket, SagaOrderState::send_ticket)

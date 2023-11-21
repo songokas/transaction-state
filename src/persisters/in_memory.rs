@@ -1,16 +1,15 @@
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::definitions::saga::Saga;
 
-use super::persister::{
-    DefinitionPersister, InitialDataPersister, LockScope, LockType, PersistError,
-};
+use super::persister::{InitialDataPersister, LockScope, LockType, PersistError, StepPersister};
 
 #[derive(Debug, Clone)]
 pub struct InMemoryPersister {
@@ -29,8 +28,9 @@ impl InMemoryPersister {
     }
 }
 
-impl DefinitionPersister for InMemoryPersister {
-    fn retrieve(&self, id: Uuid) -> Result<Saga, PersistError> {
+#[async_trait::async_trait]
+impl StepPersister for InMemoryPersister {
+    async fn retrieve(&self, id: Uuid) -> Result<Saga, PersistError> {
         self.sagas
             .read()
             .expect("sagas lock")
@@ -39,15 +39,24 @@ impl DefinitionPersister for InMemoryPersister {
             .ok_or(PersistError::NotFound)
     }
 
-    fn store(&self, saga: Saga) -> Result<(), PersistError> {
-        self.sagas
-            .write()
-            .expect("sagas lock")
-            .insert(saga.id, saga);
+    async fn store(&self, id: Uuid, step: u8, state: String) -> Result<(), PersistError> {
+        let mut sagas = self.sagas.write().expect("sagas lock");
+        let entry = sagas.entry(id);
+        match entry {
+            Entry::Occupied(mut s) => {
+                s.get_mut().states.insert(step, state);
+            }
+            Entry::Vacant(e) => {
+                e.insert(Saga {
+                    id,
+                    states: vec![(step, state)].into_iter().collect(),
+                });
+            }
+        };
         Ok(())
     }
 
-    fn lock(&self, scope: LockScope, lock_type: LockType) -> Result<(), PersistError> {
+    async fn lock(&self, scope: LockScope, lock_type: LockType) -> Result<(), PersistError> {
         let insert = if let Some(context) = self
             .locks
             .read()
@@ -62,22 +71,33 @@ impl DefinitionPersister for InMemoryPersister {
         };
 
         if insert {
-            self.locks.write().expect("persister locks lock").insert(
-                scope.id,
-                ExecutingContext {
-                    executor_id: scope.executor_id,
-                    lock_type,
-                    instant_started: Instant::now(),
-                    name: scope.name,
-                },
-            );
+            if matches!(lock_type, LockType::Finished) {
+                self.locks
+                    .write()
+                    .expect("persister locks lock")
+                    .remove(&scope.id);
+                self.sagas
+                    .write()
+                    .expect("persister locks lock")
+                    .remove(&scope.id);
+            } else {
+                self.locks.write().expect("persister locks lock").insert(
+                    scope.id,
+                    ExecutingContext {
+                        executor_id: scope.executor_id,
+                        lock_type,
+                        instant_started: Instant::now(),
+                        name: scope.name,
+                    },
+                );
+            }
             Ok(())
         } else {
             Err(PersistError::Locked)
         }
     }
 
-    fn get_next_failed(
+    async fn get_next_failed(
         &self,
         duration: Duration,
     ) -> Result<Option<(Uuid, String, Uuid)>, PersistError> {
@@ -98,7 +118,7 @@ impl DefinitionPersister for InMemoryPersister {
                 name: context.name.clone(),
             });
         if let Some(scope) = scope_result {
-            self.lock(scope.clone(), LockType::Retry)?;
+            self.lock(scope.clone(), LockType::Retry).await?;
             Ok(Some((scope.id, scope.name, new_executor)))
         } else {
             Ok(None)
@@ -106,18 +126,20 @@ impl DefinitionPersister for InMemoryPersister {
     }
 }
 
+#[async_trait::async_trait]
 impl InitialDataPersister for InMemoryPersister {
-    fn save_initial_state<S: serde::Serialize>(
+    async fn save_initial_state<S: Serialize + Sync>(
         &self,
         scope: LockScope,
         initial_state: &S,
     ) -> Result<(), PersistError> {
-        let mut saga = Saga::new(scope.id);
-        let state = serde_json::to_string(initial_state).expect("initial state serialize");
-        saga.states.insert(0, state);
-
-        self.store(saga)?;
-        self.lock(scope, LockType::Initial)
+        {
+            let state = serde_json::to_string(initial_state)?;
+            self.store(scope.id, 0, state).await?;
+        }
+        {
+            self.lock(scope, LockType::Initial).await
+        }
     }
 }
 

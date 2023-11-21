@@ -1,6 +1,9 @@
-use std::sync::{Mutex, Arc};
+use std::sync::{Arc, Mutex};
 
-use crate::models::{order::{Order, OrderId}, ticket::TicketId};
+use crate::models::{
+    order::{Order, OrderId},
+    ticket::TicketId,
+};
 
 #[derive(Clone)]
 pub struct SagaFullOrderState {
@@ -8,7 +11,7 @@ pub struct SagaFullOrderState {
 }
 
 impl SagaFullOrderState {
-    pub fn new(_order: Option<Order>) -> Self {
+    pub fn new(_order: Option<Order>, _order_id: &OrderId) -> Self {
         Self {
             order: Arc::new(Mutex::new(None)),
         }

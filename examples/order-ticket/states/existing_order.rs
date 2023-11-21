@@ -6,7 +6,7 @@ pub struct SagaOrderState {
 }
 
 impl SagaOrderState {
-    pub fn new(order: Order) -> SagaOrderState {
+    pub fn new(order: Order, _: &()) -> SagaOrderState {
         Self { order }
     }
 

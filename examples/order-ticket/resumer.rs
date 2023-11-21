@@ -1,25 +1,33 @@
 use std::time::Duration;
 
 use tokio::{spawn, time::sleep};
-use transaction_state::persisters::persister::DefinitionPersister;
+use transaction_state::persisters::persister::StepPersister;
 
 use crate::runner::run_definition;
 
-pub async fn run_resumer<P: DefinitionPersister + Clone + Send + 'static>(
+pub async fn run_resumer<P: StepPersister + Clone + Send + 'static>(
     persister: P,
     restart_with_duration: Duration,
     sleep_when_empty: Duration,
 ) {
+    let mut empty_count = 0;
     loop {
         let failed = {
             persister
                 .get_next_failed(restart_with_duration)
+                .await
                 .ok()
                 .flatten()
         };
         if let Some((id, name, executor_id)) = failed {
             spawn(run_definition(persister.clone(), name, id, executor_id));
+        } else {
+            empty_count += 1;
+            sleep(sleep_when_empty).await;
         }
-        sleep(sleep_when_empty).await;
+
+        if empty_count > 10 {
+            break;
+        }
     }
 }
