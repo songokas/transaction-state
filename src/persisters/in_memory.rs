@@ -4,12 +4,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Serialize;
 use uuid::Uuid;
 
 use crate::definitions::saga::Saga;
 
-use super::persister::{InitialDataPersister, LockScope, LockType, PersistError, StepPersister};
+use super::persister::{LockScope, LockType, PersistError, StepPersister};
 
 #[derive(Debug, Clone)]
 pub struct InMemoryPersister {
@@ -126,22 +125,23 @@ impl StepPersister for InMemoryPersister {
     }
 }
 
-#[async_trait::async_trait]
-impl InitialDataPersister for InMemoryPersister {
-    async fn save_initial_state<S: Serialize + Sync>(
-        &self,
-        scope: LockScope,
-        initial_state: &S,
-    ) -> Result<(), PersistError> {
-        {
-            let state = serde_json::to_string(initial_state)?;
-            self.store(scope.id, 0, state).await?;
-        }
-        {
-            self.lock(scope, LockType::Initial).await
-        }
-    }
-}
+// #[async_trait::async_trait]
+// impl InitialDataPersister<()> for InMemoryPersister {
+//     async fn save_initial_state<S: Serialize + Sync>(
+//         &self,
+//         _: (),
+//         scope: LockScope,
+//         initial_state: &S,
+//     ) -> Result<(), PersistError> {
+//         {
+//             let state = serde_json::to_string(initial_state)?;
+//             self.store(scope.id, 0, state).await?;
+//         }
+//         {
+//             self.lock(scope, LockType::Initial).await
+//         }
+//     }
+// }
 
 #[derive(Debug)]
 struct ExecutingContext {

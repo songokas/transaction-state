@@ -1,5 +1,6 @@
+use sqlx::{Pool, Postgres};
 use transaction_state::{
-    curry2,
+    curry, curry2,
     definitions::saga_definition::SagaDefinition,
     persisters::persister::{LockScope, StepPersister},
 };
@@ -19,12 +20,16 @@ use crate::{
 };
 
 pub fn create_full_order<P: StepPersister>(
+    pool: Pool<Postgres>,
     persister: P,
     id: Uuid,
     success: bool,
     executor_id: Uuid,
 ) -> SagaDefinition<SagaFullOrderState, Option<Order>, TicketId, DefinitionExecutionError, P> {
-    let ticket_confirmator = TickeConfirmator { success };
+    let ticket_confirmator = TickeConfirmator {
+        pool: pool.clone(),
+        success,
+    };
     SagaDefinition::new(
         LockScope {
             id,
@@ -35,7 +40,10 @@ pub fn create_full_order<P: StepPersister>(
         OrderId::new_v4(),
         persister,
     )
-    .step(create_order, SagaFullOrderState::generate_order_id)
+    .step(
+        curry!(create_order, pool),
+        SagaFullOrderState::generate_order_id,
+    )
     .step(
         create_ticket,
         SagaFullOrderState::set_order_and_create_ticket,

@@ -1,3 +1,4 @@
+use sqlx::{Pool, Postgres};
 use transaction_state::curry2;
 use transaction_state::{
     definitions::saga_definition::SagaDefinition,
@@ -12,12 +13,13 @@ use crate::{
 };
 
 pub fn create_from_existing_order<P: StepPersister>(
+    pool: Pool<Postgres>,
     persister: P,
     order_id: Uuid,
     success: bool,
     executor_id: Uuid,
 ) -> SagaDefinition<SagaOrderState, Order, TicketId, DefinitionExecutionError, P> {
-    let ticket_confirmator = TickeConfirmator { success };
+    let ticket_confirmator = TickeConfirmator { pool, success };
     SagaDefinition::new(
         LockScope {
             id: order_id,

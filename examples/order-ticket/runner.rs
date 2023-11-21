@@ -1,3 +1,4 @@
+use sqlx::{Pool, Postgres};
 use transaction_state::persisters::persister::StepPersister;
 use uuid::Uuid;
 
@@ -10,6 +11,7 @@ use crate::{
 };
 
 pub async fn run_definition<P: StepPersister + Clone + Send + 'static>(
+    pool: Pool<Postgres>,
     persister: P,
     name: String,
     id: Uuid,
@@ -17,14 +19,14 @@ pub async fn run_definition<P: StepPersister + Clone + Send + 'static>(
 ) -> Result<(), DefinitionExecutionError> {
     match name.as_str() {
         "create_from_existing_order" => {
-            let c = create_from_existing_order(persister, id, true, executor_id);
+            let c = create_from_existing_order(pool, persister, id, true, executor_id);
             let r: Result<EmailId, DefinitionExecutionError> = c.continue_from_last_step().await;
             println!("Retried email {name} {id} {r:?}");
             Ok(())
         }
         "create_full_order" => {
             let r: Result<EmailId, DefinitionExecutionError> = {
-                let a = create_full_order(persister, id, true, executor_id);
+                let a = create_full_order(pool, persister, id, true, executor_id);
                 a.continue_from_last_step().await
             };
             println!("Retried email {name} {id} {r:?}");

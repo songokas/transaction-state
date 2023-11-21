@@ -1,6 +1,5 @@
 use std::{error::Error, fmt, time::Duration};
 
-use serde::Serialize;
 use uuid::Uuid;
 
 use crate::definitions::saga::Saga;
@@ -17,14 +16,24 @@ pub trait StepPersister: Clone + Send + Sync + 'static {
 }
 
 // persist data before running while in transaction
-#[async_trait::async_trait]
-pub trait InitialDataPersister {
-    async fn save_initial_state<S: Serialize + Sync>(
-        &self,
-        scope: LockScope,
-        state: &S,
-    ) -> Result<(), PersistError>;
-}
+// #[async_trait::async_trait]
+// pub trait InitialDataPersister<T> {
+//     async fn save_initial_state(
+//         &self,
+//         transaction: T,
+//         scope: LockScope,
+//     ) -> Result<(), PersistError>;
+// }
+
+// #[async_trait::async_trait]
+// pub trait InitialDataPersister {
+//     async fn save_initial_state<T, S: Serialize + Send + Sync>(
+//         &self,
+//         transaction: T,
+//         scope: LockScope,
+//         state: &S,
+//     ) -> Result<(), PersistError>;
+// }
 
 #[derive(Clone)]
 pub struct LockScope {

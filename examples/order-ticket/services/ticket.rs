@@ -1,6 +1,8 @@
+use sqlx::{Pool, Postgres};
+
 use crate::{
     models::{email::EmailId, error::LocalError, order::Order, ticket::TicketId},
-    services::{db_transaction::start_transaction, remote::execute_remote_service},
+    services::remote::execute_remote_service,
 };
 
 use super::remote::ExternalError;
@@ -16,6 +18,7 @@ pub async fn send_ticket(order: Order) -> Result<EmailId, ExternalError> {
 }
 
 pub struct TickeConfirmator {
+    pub pool: Pool<Postgres>,
     pub success: bool,
 }
 
@@ -25,14 +28,18 @@ impl TickeConfirmator {
         mut order: Order,
         ticket_id: TicketId,
     ) -> Result<Order, LocalError> {
-        println!("confirm_ticket with {ticket_id}");
         if self.success {
-            start_transaction(|_t| {
-                order.ticket_id = ticket_id.into();
-                Ok(order)
-            })
-            .await
-            .map_err(|_| LocalError {})
+            sqlx::query("UPDATE order_ticket SET ticket_id = $1 WHERE id = $2")
+                .bind(ticket_id)
+                .bind(order.order_id)
+                .execute(&self.pool)
+                .await
+                .map_err(|_| LocalError {})?;
+
+            println!("confirm_ticket {ticket_id} for order {}", order.order_id);
+
+            order.ticket_id = ticket_id.into();
+            Ok(order)
         } else {
             Err(LocalError {})
         }
