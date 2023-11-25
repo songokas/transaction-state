@@ -3,14 +3,17 @@
 run docker
 
 ```bash
-docker run --name ticket-order --publish 5432:5432 -e POSTGRES_PASSWORD=123456 --rm -d postgres
-docker run --name adminer --network host --rm -d adminer
+docker-compose up -d
 ```
 
 run migrations
 
 ```bash
+# cargo install sqlx-cli
+sqlx database create --database-url "postgres://postgres:123456@localhost/order_ticket"
+sqlx database create --database-url "postgres://postgres:123456@localhost/order_ticket_test"
 sqlx migrate run --database-url "postgres://postgres:123456@localhost/order_ticket"
+sqlx migrate run --database-url "postgres://postgres:123456@localhost/order_ticket_test"
 ```
 
 run example
@@ -18,4 +21,3 @@ run example
 ```bash
 cargo run --example order-ticket
 ```
-

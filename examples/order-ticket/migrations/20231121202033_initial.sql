@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS saga_lock (
 CREATE TABLE IF NOT EXISTS order_ticket (
     id uuid PRIMARY KEY,
     ticket_id uuid NULL,
+    email_id uuid NULL,
+    cancelled TIMESTAMP NULL,
     dtc TIMESTAMP NOT NULL DEFAULT NOW ()
 );
 

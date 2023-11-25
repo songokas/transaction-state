@@ -1,4 +1,9 @@
-use crate::models::{order::Order, ticket::TicketId};
+use std::error::Error;
+
+use crate::models::{
+    order::{Order, OrderId},
+    ticket::TicketId,
+};
 
 #[derive(Debug, Clone)]
 pub struct SagaOrderState {
@@ -12,6 +17,10 @@ impl SagaOrderState {
 
     pub fn create_ticket(&self, _: ()) -> Order {
         self.order.clone()
+    }
+
+    pub fn cancel_order(&self, _: &impl Error) -> OrderId {
+        self.order.order_id
     }
 
     pub fn confirm_ticket(&self, ticket_id: TicketId) -> (Order, TicketId) {

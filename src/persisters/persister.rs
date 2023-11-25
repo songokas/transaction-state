@@ -15,27 +15,7 @@ pub trait StepPersister: Clone + Send + Sync + 'static {
     ) -> Result<Option<(Uuid, String, Uuid)>, PersistError>;
 }
 
-// persist data before running while in transaction
-// #[async_trait::async_trait]
-// pub trait InitialDataPersister<T> {
-//     async fn save_initial_state(
-//         &self,
-//         transaction: T,
-//         scope: LockScope,
-//     ) -> Result<(), PersistError>;
-// }
-
-// #[async_trait::async_trait]
-// pub trait InitialDataPersister {
-//     async fn save_initial_state<T, S: Serialize + Send + Sync>(
-//         &self,
-//         transaction: T,
-//         scope: LockScope,
-//         state: &S,
-//     ) -> Result<(), PersistError>;
-// }
-
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LockScope {
     pub id: Uuid,
     pub executor_id: Uuid,

@@ -2,7 +2,7 @@
 macro_rules! curry {
     ($f:expr,$s:expr) => {{
         let o = $s;
-        |p| async move { $f(&o, p).await }
+        move |p| async move { $f(&o, p).await }
     }};
 }
 
@@ -30,6 +30,13 @@ macro_rules! curry4 {
     }};
 }
 
+#[macro_export]
+macro_rules! curryt {
+    ($a:expr,$b:expr,$c:expr) => {{
+        let o = $c;
+        move |a_arg2| async move { $b(&o, |a_arg1| Box::pin($a(a_arg1, a_arg2))).await }
+    }};
+}
 
 #[cfg(test)]
 mod tests {

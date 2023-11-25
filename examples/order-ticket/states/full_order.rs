@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    error::Error,
+    sync::{Arc, Mutex},
+};
 
 use crate::models::{
     order::{Order, OrderId},
@@ -24,6 +27,10 @@ impl SagaFullOrderState {
     pub fn set_order_and_create_ticket(&self, order: Order) -> Order {
         *self.order.lock().unwrap() = Some(order.clone());
         order
+    }
+
+    pub fn cancel_order(&self, _err: &impl Error) -> OrderId {
+        self.order.lock().unwrap().clone().unwrap().order_id
     }
 
     pub fn confirm_ticket(&self, ticket_id: TicketId) -> (Order, TicketId) {

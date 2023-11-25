@@ -22,6 +22,7 @@ pub async fn run_resumer<P: StepPersister + Clone + Send + 'static>(
                 .flatten()
         };
         if let Some((id, name, executor_id)) = failed {
+            empty_count = 0;
             spawn(run_definition(
                 pool.clone(),
                 persister.clone(),
@@ -34,7 +35,7 @@ pub async fn run_resumer<P: StepPersister + Clone + Send + 'static>(
             sleep(sleep_when_empty).await;
         }
 
-        if empty_count > 10 {
+        if empty_count > 20 {
             break;
         }
     }

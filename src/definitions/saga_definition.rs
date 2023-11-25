@@ -62,10 +62,18 @@ where
                 // TODO is there a need for initial_data
                 let s = state(fd, &initial_data);
                 let f = Box::pin(async move {
-                    persist
-                        .store(scope_id, step, initial_state?)
-                        .await
-                        .map_err(WrappingError::from)?;
+                    if !existing_saga
+                        .read()
+                        .expect("existing saga")
+                        .states
+                        .contains_key(&step)
+                    {
+                        persist
+                            .store(scope_id, step, initial_state?)
+                            .await
+                            .map_err(WrappingError::from)?;
+                    }
+
                     Ok(initial_data)
                 });
                 (Arc::new(s), f)
@@ -76,7 +84,7 @@ where
 
     pub fn step<
         NewError,
-        F,
+        OperationFuture,
         FactoryResult: Send + 'static,
         Factory,
         Operation,
@@ -87,9 +95,9 @@ where
         factory: Factory,
     ) -> SagaDefinition<State, FactoryData, NewFutureResult, WrappingError, Persister>
     where
-        Operation: FnOnce(FactoryResult) -> F + Send + 'static,
+        Operation: FnOnce(FactoryResult) -> OperationFuture + Send + 'static,
         Factory: FnOnce(&State, OperationResult) -> FactoryResult + Send + 'static,
-        F: Future<Output = Result<NewFutureResult, NewError>> + Send + 'static,
+        OperationFuture: Future<Output = Result<NewFutureResult, NewError>> + Send + 'static,
         WrappingError: From<NewError> + From<PersistError>,
         NewFutureResult: Serialize + DeserializeOwned + Send + Sync,
     {
@@ -107,6 +115,7 @@ where
 
                 let s = current_state.clone();
                 let f = Box::pin(async move {
+                    log::info!("executing step {definition_step}");
                     let operation_result = previous_executing.await?;
                     let factory_result = factory(&s, operation_result);
                     let existing_state = {
@@ -144,6 +153,57 @@ where
         }
     }
 
+    pub fn on_error<
+        NewError,
+        OperationFuture,
+        FactoryResult: Send + 'static,
+        Factory,
+        Operation,
+        NewFutureResult,
+    >(
+        self,
+        operation: Operation,
+        factory: Factory,
+    ) -> SagaDefinition<State, FactoryData, OperationResult, WrappingError, Persister>
+    where
+        Operation: FnOnce(FactoryResult) -> OperationFuture + Send + 'static,
+        Factory: FnOnce(&State, &WrappingError) -> FactoryResult + Send + 'static,
+        OperationFuture: Future<Output = Result<NewFutureResult, NewError>> + Send + 'static,
+        WrappingError: From<NewError> + From<PersistError>,
+        NewFutureResult: Serialize + DeserializeOwned + Send + Sync,
+    {
+        let previous = self.operation;
+        let definition_step = self.step + 1;
+        let existing_saga = self.existing_saga.clone();
+        SagaDefinition {
+            lock_scope: self.lock_scope,
+            step: definition_step,
+            existing_saga: self.existing_saga.clone(),
+            operation: Box::new(move |d| {
+                let (current_state, previous_executing) = previous(d);
+
+                let s = current_state.clone();
+                let f = Box::pin(async move {
+                    let operation_result = previous_executing.await;
+                    match operation_result {
+                        Ok(r) => Ok(r),
+                        Err(e) => {
+                            let factory_result = factory(&s, &e);
+                            // if error operation fails saga will restart from last step
+                            operation(factory_result)
+                                .await
+                                .map_err(WrappingError::from)?;
+                            existing_saga.write().expect("existing saga").cancelled = true;
+                            Err(e)
+                        }
+                    }
+                });
+                (current_state, f)
+            }),
+            persister: self.persister,
+        }
+    }
+
     pub async fn run(self, data: FactoryData) -> Result<OperationResult, WrappingError> {
         let lock_scope = self.lock_scope;
         self.persister
@@ -158,10 +218,12 @@ where
         let (_state, f) = (self.operation)(data);
         let result = f.await;
 
+        let finish = result.is_ok() || self.existing_saga.read().expect("saga lock").cancelled;
+
         self.persister
             .lock(
                 lock_scope,
-                if result.is_ok() {
+                if finish {
                     LockType::Finished
                 } else {
                     LockType::Failed
@@ -197,10 +259,12 @@ where
         let (_state, f) = (self.operation)(data);
         let result = f.await;
 
+        let finish = result.is_ok() || self.existing_saga.read().expect("saga lock").cancelled;
+
         self.persister
             .lock(
                 lock_scope,
-                if result.is_ok() {
+                if finish {
                     LockType::Finished
                 } else {
                     LockType::Failed
@@ -270,6 +334,10 @@ mod tests {
         fn for_test4(&self, test3_data: (String, String)) -> String {
             test3_data.0 + &test3_data.1
         }
+
+        fn handle_produce_error(&self, _e: &DefinitionError) -> bool {
+            true
+        }
     }
 
     struct Test1AndTest2 {}
@@ -304,6 +372,18 @@ mod tests {
         async fn test4(&self, out: String) -> Result<u32, DefinitionError> {
             Ok(out.len() as u32)
         }
+    }
+
+    async fn produce_error(success: &bool, v: usize) -> Result<bool, DefinitionError> {
+        if *success {
+            Ok(v > 10)
+        } else {
+            Err(DefinitionError("produce_error".to_string()))
+        }
+    }
+
+    async fn stop_on_error(v: bool) -> Result<bool, DefinitionError> {
+        Ok(v)
     }
 
     async fn test1(v: usize) -> Result<bool, DefinitionError> {
@@ -387,6 +467,16 @@ mod tests {
             )
     }
 
+    fn create_definition_with_error(
+        success: bool,
+    ) -> SagaDefinition<State, String, Option<char>, DefinitionError, Blackhole> {
+        let lock_scope = LockScope::from_id(Uuid::new_v4(), "create_definition2".to_string());
+        SagaDefinition::new(lock_scope, State::new, 3, Blackhole::default())
+            .step(curry!(produce_error, success), State::for_test1)
+            .on_error(stop_on_error, State::handle_produce_error)
+            .step(test2, State::for_test2)
+    }
+
     #[tokio::test]
     async fn test_definition1() {
         let definition = create_definition1();
@@ -452,5 +542,18 @@ mod tests {
         let definition = create_definition4(definition_id, 6, true, persister);
         let result = definition.continue_from_last_step().await.unwrap();
         assert_eq!(13, result);
+    }
+
+    #[tokio::test]
+    async fn test_definition_with_error() {
+        let definition = create_definition_with_error(true);
+        let run_with_data = "run data".to_string();
+        let result = definition.run(run_with_data.clone()).await.unwrap();
+        assert_eq!(Some('t'), result);
+
+        let definition = create_definition_with_error(false);
+        let run_with_data = "run data".to_string();
+        let result = definition.run(run_with_data.clone()).await;
+        assert!(matches!(result, Err(DefinitionError(_))));
     }
 }

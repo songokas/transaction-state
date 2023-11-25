@@ -49,6 +49,7 @@ impl StepPersister for InMemoryPersister {
                 e.insert(Saga {
                     id,
                     states: vec![(step, state)].into_iter().collect(),
+                    cancelled: false,
                 });
             }
         };
@@ -157,23 +158,35 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_same_executor_can_always_lock() {
+    #[tokio::test]
+    async fn test_same_executor_can_always_lock() {
         let persister = InMemoryPersister::new(Duration::from_millis(10));
         let scope = LockScope {
             id: Uuid::new_v4(),
             executor_id: Uuid::new_v4(),
             name: "test1".to_string(),
         };
-        persister.lock(scope.clone(), LockType::Initial).unwrap();
-        persister.lock(scope.clone(), LockType::Failed).unwrap();
-        persister.lock(scope.clone(), LockType::Retry).unwrap();
-        persister.lock(scope.clone(), LockType::Executing).unwrap();
-        persister.lock(scope, LockType::Finished).unwrap();
+        persister
+            .lock(scope.clone(), LockType::Initial)
+            .await
+            .unwrap();
+        persister
+            .lock(scope.clone(), LockType::Failed)
+            .await
+            .unwrap();
+        persister
+            .lock(scope.clone(), LockType::Retry)
+            .await
+            .unwrap();
+        persister
+            .lock(scope.clone(), LockType::Executing)
+            .await
+            .unwrap();
+        persister.lock(scope, LockType::Finished).await.unwrap();
     }
 
-    #[test]
-    fn test_different_executor_can_lock_conditionally() {
+    #[tokio::test]
+    async fn test_different_executor_can_lock_conditionally() {
         let persister = InMemoryPersister::new(Duration::from_millis(10));
         let scope1 = LockScope {
             id: Uuid::new_v4(),
@@ -185,17 +198,20 @@ mod tests {
             executor_id: Uuid::new_v4(),
             name: "test1".to_string(),
         };
-        persister.lock(scope1.clone(), LockType::Initial).unwrap();
+        persister
+            .lock(scope1.clone(), LockType::Initial)
+            .await
+            .unwrap();
 
-        let result = persister.lock(scope2.clone(), LockType::Executing);
+        let result = persister.lock(scope2.clone(), LockType::Executing).await;
         assert!(matches!(result, Err(PersistError::Locked)));
 
         sleep(Duration::from_millis(13));
 
-        let result = persister.lock(scope2.clone(), LockType::Failed);
+        let result = persister.lock(scope2.clone(), LockType::Failed).await;
         assert!(result.is_ok(), "{result:?}");
 
-        let result = persister.lock(scope1.clone(), LockType::Executing);
+        let result = persister.lock(scope1.clone(), LockType::Executing).await;
         assert!(result.is_ok(), "{result:?}");
     }
 }

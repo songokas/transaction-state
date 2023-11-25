@@ -26,12 +26,12 @@ impl StepPersister for SqlxPersister {
     async fn lock(&self, scope: LockScope, lock_type: LockType) -> Result<(), PersistError> {
         let mut tx =
             self.pool.begin().await.map_err(|e| {
-                PersistError::Execution(e.to_string(), "store transaction".to_string())
+                PersistError::Execution(e.to_string(), "lock transaction".to_string())
             })?;
         let result = lock(&mut tx, scope, lock_type, self.lock_timeout).await;
         tx.commit()
             .await
-            .map_err(|e| PersistError::Execution(e.to_string(), "store comit".to_string()))?;
+            .map_err(|e| PersistError::Execution(e.to_string(), "lock".to_string()))?;
         result
     }
 
@@ -43,7 +43,11 @@ impl StepPersister for SqlxPersister {
                 .await
                 .map_err(|e| PersistError::Execution(e.to_string(), "retrieve".to_string()))?;
         let states = rows.into_iter().map(|row| (row.0 as u8, row.1)).collect();
-        Ok(Saga { id, states })
+        Ok(Saga {
+            id,
+            states,
+            cancelled: false,
+        })
     }
 
     async fn store(&self, id: Uuid, step: u8, state: String) -> Result<(), PersistError> {
@@ -62,15 +66,36 @@ impl StepPersister for SqlxPersister {
         &self,
         for_duration: Duration,
     ) -> Result<Option<(Uuid, String, Uuid)>, PersistError> {
-        sqlx::query_as::<_, (Uuid, String, Uuid)>(
-            "SELECT id, name, executor_id FROM saga_lock WHERE (dtc > $1 OR lock = $2) AND lock != $3 ORDER BY dtc DESC LIMIT 1"
+        let mut tx =
+            self.pool.begin().await.map_err(|e| {
+                PersistError::Execution(e.to_string(), "store transaction".to_string())
+            })?;
+        let result = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT id, name FROM saga_lock WHERE (dtc < $1 OR lock = $2) AND lock != $3 ORDER BY dtc DESC LIMIT 1"
         )
-            .bind(for_duration)
+            .bind(Utc::now().naive_utc() - for_duration)
             .bind(SqlxLockType::Failed)
             .bind(SqlxLockType::Finished)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| PersistError::Execution(e.to_string(), "retrieve failed".to_string()))
+            .map_err(|e| PersistError::Execution(e.to_string(), "retrieve failed".to_string()))?;
+
+        if let Some((id, name)) = result {
+            let executor_id = Uuid::new_v4();
+            let scope = LockScope {
+                id,
+                executor_id,
+                name,
+            };
+            lock(&mut tx, scope.clone(), LockType::Retry, for_duration).await?;
+            tx.commit()
+                .await
+                .map_err(|e| PersistError::Execution(e.to_string(), "get commit".to_string()))?;
+
+            Ok(Some((scope.id, scope.name, executor_id)))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -112,14 +137,20 @@ async fn lock(
     if insert {
         if matches!(lock_type, LockType::Finished) {
             // TODO delete or not
-            // sqlx::query("DELETE FROM saga_lock WHERE id = ?")
-            //     .bind(scope.id)
-            //     .execute(&self.pool)
-            //     .await?;
-            // sqlx::query("DELETE FROM saga_step WHERE id = ?")
-            //     .bind(scope.id)
-            //     .execute(&self.pool)
-            //     .await?;
+            sqlx::query("DELETE FROM saga_lock WHERE id = $1")
+                .bind(scope.id)
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| {
+                    PersistError::Execution(e.to_string(), "finished saga lock".to_string())
+                })?;
+            sqlx::query("DELETE FROM saga_step WHERE id = $1")
+                .bind(scope.id)
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| {
+                    PersistError::Execution(e.to_string(), "finished saga step".to_string())
+                })?;
         } else {
             sqlx::query(
                 "INSERT INTO saga_lock (id, executor_id, name, lock, dtc)
@@ -148,7 +179,8 @@ async fn store(
 ) -> Result<(), PersistError> {
     sqlx::query(
         "INSERT INTO saga_step (id, step, state)
-            VALUES ($1, $2, $3)",
+            VALUES ($1, $2, $3)
+            ",
     )
     .bind(id)
     .bind(step as i16)
@@ -181,14 +213,76 @@ impl From<LockType> for SqlxLockType {
     }
 }
 
-impl From<SqlxLockType> for LockType {
-    fn from(value: SqlxLockType) -> Self {
-        match value {
-            SqlxLockType::Executing => LockType::Executing,
-            SqlxLockType::Failed => LockType::Failed,
-            SqlxLockType::Finished => LockType::Finished,
-            SqlxLockType::Initial => LockType::Initial,
-            SqlxLockType::Retry => LockType::Retry,
-        }
+#[cfg(test)]
+mod tests {
+    use std::thread::sleep;
+
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_same_executor_can_always_lock() {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect_lazy("postgres://postgres:123456@localhost/order_ticket_test")
+            .unwrap();
+        let persister = SqlxPersister::new(pool, Duration::from_millis(10));
+        let scope = LockScope {
+            id: Uuid::new_v4(),
+            executor_id: Uuid::new_v4(),
+            name: "test1".to_string(),
+        };
+        persister
+            .lock(scope.clone(), LockType::Initial)
+            .await
+            .unwrap();
+        persister
+            .lock(scope.clone(), LockType::Failed)
+            .await
+            .unwrap();
+        persister
+            .lock(scope.clone(), LockType::Retry)
+            .await
+            .unwrap();
+        persister
+            .lock(scope.clone(), LockType::Executing)
+            .await
+            .unwrap();
+        persister.lock(scope, LockType::Finished).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_different_executor_can_lock_conditionally() {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect_lazy("postgres://postgres:123456@localhost/order_ticket_test")
+            .unwrap();
+        let persister = SqlxPersister::new(pool, Duration::from_millis(100));
+        let scope1 = LockScope {
+            id: Uuid::new_v4(),
+            executor_id: Uuid::new_v4(),
+            name: "test1".to_string(),
+        };
+        let scope2 = LockScope {
+            id: scope1.id,
+            executor_id: Uuid::new_v4(),
+            name: "test1".to_string(),
+        };
+        persister
+            .lock(scope1.clone(), LockType::Initial)
+            .await
+            .unwrap();
+
+        let result = persister.lock(scope2.clone(), LockType::Executing).await;
+        assert!(matches!(result, Err(PersistError::Locked)), "{result:?}");
+
+        sleep(Duration::from_millis(113));
+
+        let result = persister.lock(scope2.clone(), LockType::Failed).await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let result = persister.lock(scope1.clone(), LockType::Executing).await;
+        assert!(result.is_ok(), "{result:?}");
     }
 }

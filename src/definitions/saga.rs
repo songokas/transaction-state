@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub struct Saga {
     pub id: Uuid,
     pub states: BTreeMap<u8, String>,
+    pub cancelled: bool,
 }
 
 impl Saga {
@@ -13,6 +14,7 @@ impl Saga {
         Self {
             id,
             states: Default::default(),
+            cancelled: false,
         }
     }
     pub fn last_step(&self) -> u8 {
