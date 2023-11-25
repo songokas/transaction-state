@@ -31,10 +31,10 @@ macro_rules! curry4 {
 }
 
 #[macro_export]
-macro_rules! curryt {
+macro_rules! curry_inner {
     ($a:expr,$b:expr,$c:expr) => {{
-        let o = $c;
-        move |a_arg2| async move { $b(&o, |a_arg1| Box::pin($a(a_arg1, a_arg2))).await }
+        let o = $b;
+        move |a_arg2| async move { $a(&o, |a_arg1| Box::pin($c(a_arg1, a_arg2))).await }
     }};
 }
 

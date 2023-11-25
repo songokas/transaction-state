@@ -22,6 +22,7 @@ mod resumer;
 mod runner;
 mod services;
 mod states;
+mod transaction;
 
 // create order - local service
 // create ticket - external service
@@ -59,6 +60,7 @@ async fn main() {
             Uuid::new_v4(),
         );
         let lock_scope = definition.lock_scope.clone();
+
         let order = {
             let mut tx = pool.begin().await.unwrap();
             let order = create_order(&mut tx, order_id).await.unwrap();

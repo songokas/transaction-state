@@ -1,24 +1,19 @@
-use std::{future::Future, pin::Pin};
-
-use sqlx::{Pool, Postgres, Transaction};
+use sqlx::{Pool, Postgres};
 use transaction_state::{
-    curry, curry2, curryt,
+    curry, curry2, curry_inner,
     definitions::saga_definition::SagaDefinition,
     persisters::persister::{LockScope, StepPersister},
 };
 use uuid::Uuid;
 
 use crate::{
-    models::{
-        error::{DefinitionExecutionError, LocalError, TransactionError},
-        order::Order,
-        ticket::TicketId,
-    },
+    models::{error::DefinitionExecutionError, order::Order, ticket::TicketId},
     services::{
         order::{cancel_order, create_order},
         ticket::{create_ticket, send_ticket, TicketConfirmator},
     },
     states::full_order::SagaFullOrderState,
+    transaction::execute_transaction,
 };
 
 pub fn create_full_order<P: StepPersister>(
@@ -44,18 +39,7 @@ pub fn create_full_order<P: StepPersister>(
         persister,
     )
     .step(
-        curryt!(create_order, transaction, pool.clone()),
-        // |v| async move {
-        //     let mut tx = cpool
-        //         .begin()
-        //         .await
-        //         .map_err(|e| TransactionError(e.to_string()))?;
-        //     let r = create_order(&mut tx, v).await;
-        //     tx.commit()
-        //         .await
-        //         .map_err(|e| TransactionError(e.to_string()))?;
-        //     r
-        // },
+        curry_inner!(execute_transaction, pool.clone(), create_order),
         SagaFullOrderState::generate_order_id,
     )
     .step(
@@ -71,24 +55,4 @@ pub fn create_full_order<P: StepPersister>(
         SagaFullOrderState::confirm_ticket,
     )
     .step(curry!(send_ticket, pool), SagaFullOrderState::send_ticket)
-}
-
-async fn transaction<
-    T,
-    C: for<'a> FnOnce(
-        &'a mut Transaction<'_, Postgres>,
-    ) -> Pin<Box<dyn Future<Output = Result<T, LocalError>> + Send + 'a>>,
->(
-    pool: &Pool<Postgres>,
-    f: C,
-) -> Result<T, LocalError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| LocalError::Transaction(TransactionError(e.to_string())))?;
-    let r = f(&mut tx).await?;
-    tx.commit()
-        .await
-        .map_err(|e| LocalError::Transaction(TransactionError(e.to_string())))?;
-    Ok(r)
 }
