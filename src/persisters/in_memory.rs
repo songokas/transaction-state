@@ -6,13 +6,13 @@ use std::{
 
 use uuid::Uuid;
 
-use crate::definitions::saga::Saga;
+use crate::definitions::saga_state::SagaState;
 
 use super::persister::{LockScope, LockType, PersistError, StepPersister};
 
 #[derive(Debug, Clone)]
 pub struct InMemoryPersister {
-    sagas: Arc<RwLock<HashMap<Uuid, Saga>>>,
+    sagas: Arc<RwLock<HashMap<Uuid, SagaState>>>,
     locks: Arc<RwLock<HashMap<Uuid, ExecutingContext>>>,
     lock_timeout: Duration,
 }
@@ -29,7 +29,7 @@ impl InMemoryPersister {
 
 #[async_trait::async_trait]
 impl StepPersister for InMemoryPersister {
-    async fn retrieve(&self, id: Uuid) -> Result<Saga, PersistError> {
+    async fn retrieve(&self, id: Uuid) -> Result<SagaState, PersistError> {
         self.sagas
             .read()
             .expect("sagas lock")
@@ -46,7 +46,7 @@ impl StepPersister for InMemoryPersister {
                 s.get_mut().states.insert(step, state);
             }
             Entry::Vacant(e) => {
-                e.insert(Saga {
+                e.insert(SagaState {
                     id,
                     states: vec![(step, state)].into_iter().collect(),
                     cancelled: false,
@@ -125,24 +125,6 @@ impl StepPersister for InMemoryPersister {
         }
     }
 }
-
-// #[async_trait::async_trait]
-// impl InitialDataPersister<()> for InMemoryPersister {
-//     async fn save_initial_state<S: Serialize + Sync>(
-//         &self,
-//         _: (),
-//         scope: LockScope,
-//         initial_state: &S,
-//     ) -> Result<(), PersistError> {
-//         {
-//             let state = serde_json::to_string(initial_state)?;
-//             self.store(scope.id, 0, state).await?;
-//         }
-//         {
-//             self.lock(scope, LockType::Initial).await
-//         }
-//     }
-// }
 
 #[derive(Debug)]
 struct ExecutingContext {

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use crate::definitions::saga::Saga;
+use crate::definitions::saga_state::SagaState;
 
 use super::persister::{LockScope, LockType, PersistError, StepPersister};
 
@@ -15,7 +15,7 @@ impl StepPersister for Blackhole {
         Ok(())
     }
 
-    async fn retrieve(&self, _id: Uuid) -> Result<Saga, PersistError> {
+    async fn retrieve(&self, _id: Uuid) -> Result<SagaState, PersistError> {
         Err(PersistError::NotFound)
     }
 

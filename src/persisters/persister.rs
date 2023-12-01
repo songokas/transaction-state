@@ -2,12 +2,12 @@ use std::{error::Error, fmt, time::Duration};
 
 use uuid::Uuid;
 
-use crate::definitions::saga::Saga;
+use crate::definitions::saga_state::SagaState;
 
 #[async_trait::async_trait]
 pub trait StepPersister: Clone + Send + Sync + 'static {
     async fn lock(&self, scope: LockScope, lock_type: LockType) -> Result<(), PersistError>;
-    async fn retrieve(&self, id: Uuid) -> Result<Saga, PersistError>;
+    async fn retrieve(&self, id: Uuid) -> Result<SagaState, PersistError>;
     async fn store(&self, id: Uuid, step: u8, state: String) -> Result<(), PersistError>;
     async fn get_next_failed(
         &self,

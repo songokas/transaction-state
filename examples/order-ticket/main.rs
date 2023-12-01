@@ -12,6 +12,7 @@ use services::{
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::spawn;
+use transaction_state::definitions::saga_definition::SagaRunner;
 use uuid::Uuid;
 
 use crate::models::{email::EmailId, error::DefinitionExecutionError};
@@ -59,7 +60,7 @@ async fn main() {
             rand::random(),
             Uuid::new_v4(),
         );
-        let lock_scope = definition.lock_scope.clone();
+        let lock_scope = definition.lock_scope().clone();
 
         let order = {
             let mut tx = pool.begin().await.unwrap();
@@ -95,7 +96,7 @@ async fn main() {
         });
     }
 
-    runner.await.unwrap();
+    let definitions_retried = runner.await.unwrap();
 
     let order_count = orders.len();
 
@@ -111,7 +112,7 @@ async fn main() {
     let stat: (i64, i64, i64) = sqlx::query_as(&query).fetch_one(&pool).await.unwrap();
 
     log::info!(
-        "Orders created: {order_count} Orders cancelled: {} Tickets updated: {} Emails sent: {}",
+        "Orders created: {order_count} Orders cancelled: {} Tickets updated: {} Emails sent: {} Definitions Retried: {definitions_retried}",
         stat.2,
         stat.0,
         stat.1,

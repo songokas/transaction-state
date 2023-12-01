@@ -10,69 +10,25 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::persisters::persister::{LockScope, LockType, PersistError, StepPersister};
 
-use super::saga::Saga;
+use super::saga_state::SagaState;
 
 #[async_trait]
-pub trait SagaTrait<State, FactoryData, OperationResult, WrappingError, Persister> {
-    fn step<
-        NewError,
-        OperationFuture,
-        FactoryResult: Send + 'static,
-        Factory,
-        Operation,
-        NewFutureResult: 'static,
-    >(
-        self,
-        operation: Operation,
-        factory: Factory,
-    ) -> SagaDefinition<State, FactoryData, NewFutureResult, WrappingError, Persister>
+pub trait SagaRunner<In, Out, WrappingError> {
+    async fn run(self, data: In) -> Result<Out, WrappingError>;
+    async fn continue_from_last_step(self) -> Result<Out, WrappingError>
     where
-        Operation: FnOnce(FactoryResult) -> OperationFuture + Send + 'static,
-        Factory: FnOnce(&State, OperationResult) -> FactoryResult + Send + 'static,
-        OperationFuture: Future<Output = Result<NewFutureResult, NewError>> + Send + 'static,
-        WrappingError: From<NewError> + From<PersistError>,
-        NewFutureResult: Serialize + DeserializeOwned + Send + Sync;
-
-    fn on_error<
-        NewError,
-        OperationFuture,
-        FactoryResult: Send + 'static,
-        Factory,
-        Operation,
-        NewFutureResult,
-    >(
-        self,
-        operation: Operation,
-        factory: Factory,
-    ) -> SagaDefinition<State, FactoryData, OperationResult, WrappingError, Persister>
-    where
-        Operation: FnOnce(FactoryResult) -> OperationFuture + Send + 'static,
-        Factory: FnOnce(&State, &WrappingError) -> FactoryResult + Send + 'static,
-        OperationFuture: Future<Output = Result<NewFutureResult, NewError>> + Send + 'static,
-        WrappingError: From<NewError> + From<PersistError>,
-        NewFutureResult: Serialize + DeserializeOwned + Send + Sync;
-
-    async fn run(self, data: FactoryData) -> Result<OperationResult, WrappingError>;
-    async fn continue_from_last_step(self) -> Result<OperationResult, WrappingError>
-    where
-        FactoryData: DeserializeOwned;
+        In: DeserializeOwned;
 }
 
-pub type OperationDefinition<State, In, OperationResult, E> = Box<
-    dyn FnOnce(
-            In,
-        ) -> (
-            State,
-            Pin<Box<dyn Future<Output = Result<OperationResult, E>> + Send>>,
-        ) + Send,
->;
+pub type OperationDefinition<State, In, Out, E> =
+    Box<dyn FnOnce(In) -> (State, Pin<Box<dyn Future<Output = Result<Out, E>> + Send>>) + Send>;
 
 pub struct SagaDefinition<State, In, Out, WrappingError, Persister> {
-    pub lock_scope: LockScope,
+    lock_scope: LockScope,
     step: u8,
     operation: OperationDefinition<Arc<State>, In, Out, WrappingError>,
     persister: Persister,
-    existing_saga: Arc<RwLock<Saga>>,
+    existing_saga: Arc<RwLock<SagaState>>,
 }
 
 impl<State, FactoryData, OperationResult, WrappingError, Persister>
@@ -93,7 +49,7 @@ where
     where
         StateCreator: FnOnce(FactoryData, &OperationResult) -> State + Send + 'static,
     {
-        let existing_saga = Arc::new(RwLock::new(Saga::new(lock_scope.id)));
+        let existing_saga = Arc::new(RwLock::new(SagaState::new(lock_scope.id)));
         let step = 0;
         let persist = persister.clone();
         let scope_id = lock_scope.id;
@@ -128,20 +84,8 @@ where
             persister,
         }
     }
-}
 
-#[async_trait]
-impl<State, FactoryData, OperationResult, WrappingError, Persister>
-    SagaSa<State, FactoryData, OperationResult, WrappingError, Persister>
-    for SagaDefinition<State, FactoryData, OperationResult, WrappingError, Persister>
-where
-    State: 'static + Send + Sync,
-    FactoryData: Serialize + 'static + Send + Sync,
-    OperationResult: 'static + Send,
-    WrappingError: Error + From<PersistError> + 'static + Send + Sync,
-    Persister: StepPersister + Clone + Send + Sync + 'static,
-{
-    fn step<
+    pub fn step<
         NewError,
         OperationFuture,
         FactoryResult: Send + 'static,
@@ -212,7 +156,7 @@ where
         }
     }
 
-    fn on_error<
+    pub fn on_error<
         NewError,
         OperationFuture,
         FactoryResult: Send + 'static,
@@ -263,6 +207,21 @@ where
         }
     }
 
+    pub fn lock_scope(&self) -> &LockScope {
+        &self.lock_scope
+    }
+}
+
+#[async_trait]
+impl<State, FactoryData, OperationResult, WrappingError, Persister>
+    SagaRunner<FactoryData, OperationResult, WrappingError>
+    for SagaDefinition<State, FactoryData, OperationResult, WrappingError, Persister>
+where
+    FactoryData: Send,
+    OperationResult: Send,
+    WrappingError: From<PersistError> + Send,
+    Persister: StepPersister + Clone + Send + Sync + 'static,
+{
     async fn run(self, data: FactoryData) -> Result<OperationResult, WrappingError> {
         let lock_scope = self.lock_scope;
         self.persister
@@ -274,7 +233,7 @@ where
             *self.existing_saga.write().expect("saga lock") = s;
         }
 
-        let (_state, f) = (self.operation)(data);
+        let (_, f) = (self.operation)(data);
         let result = f.await;
 
         let finish = result.is_ok() || self.existing_saga.read().expect("saga lock").cancelled;
@@ -315,7 +274,7 @@ where
             .map_err(WrappingError::from)?;
         *self.existing_saga.write().expect("saga lock") = saga;
 
-        let (_state, f) = (self.operation)(data);
+        let (_, f) = (self.operation)(data);
         let result = f.await;
 
         let finish = result.is_ok() || self.existing_saga.read().expect("saga lock").cancelled;

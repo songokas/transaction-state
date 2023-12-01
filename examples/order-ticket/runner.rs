@@ -1,5 +1,7 @@
 use sqlx::{Pool, Postgres};
-use transaction_state::persisters::persister::StepPersister;
+use transaction_state::{
+    definitions::saga_definition::SagaRunner, persisters::persister::StepPersister,
+};
 use uuid::Uuid;
 
 use crate::{

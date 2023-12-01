@@ -11,7 +11,8 @@ pub async fn run_resumer<P: StepPersister + Clone + Send + 'static>(
     persister: P,
     restart_with_duration: Duration,
     sleep_when_empty: Duration,
-) {
+) -> u64 {
+    let mut run_count = 0;
     let mut empty_count = 0;
     loop {
         let failed = {
@@ -23,6 +24,7 @@ pub async fn run_resumer<P: StepPersister + Clone + Send + 'static>(
         };
         if let Some((id, name, executor_id)) = failed {
             empty_count = 0;
+            run_count += 1;
             spawn(run_definition(
                 pool.clone(),
                 persister.clone(),
@@ -39,4 +41,5 @@ pub async fn run_resumer<P: StepPersister + Clone + Send + 'static>(
             break;
         }
     }
+    run_count
 }

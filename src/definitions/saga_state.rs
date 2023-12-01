@@ -3,13 +3,13 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
-pub struct Saga {
+pub struct SagaState {
     pub id: Uuid,
     pub states: BTreeMap<u8, String>,
     pub cancelled: bool,
 }
 
-impl Saga {
+impl SagaState {
     pub fn new(id: Uuid) -> Self {
         Self {
             id,

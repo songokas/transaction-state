@@ -4,7 +4,7 @@ use chrono::{NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres, Transaction};
 use transaction_state::{
-    definitions::saga::Saga,
+    definitions::saga_state::SagaState,
     persisters::persister::{LockScope, LockType, PersistError, StepPersister},
 };
 use uuid::Uuid;
@@ -35,7 +35,7 @@ impl StepPersister for SqlxPersister {
         result
     }
 
-    async fn retrieve(&self, id: Uuid) -> Result<Saga, PersistError> {
+    async fn retrieve(&self, id: Uuid) -> Result<SagaState, PersistError> {
         let rows: Vec<(i16, String)> =
             sqlx::query_as("SELECT step, state FROM saga_step WHERE id = $1")
                 .bind(id)
@@ -43,7 +43,7 @@ impl StepPersister for SqlxPersister {
                 .await
                 .map_err(|e| PersistError::Execution(e.to_string(), "retrieve".to_string()))?;
         let states = rows.into_iter().map(|row| (row.0 as u8, row.1)).collect();
-        Ok(Saga {
+        Ok(SagaState {
             id,
             states,
             cancelled: false,
@@ -99,7 +99,6 @@ impl StepPersister for SqlxPersister {
     }
 }
 
-// TODO trait
 pub async fn save_initial_state<S: Serialize + Send + Sync>(
     tx: &mut Transaction<'_, Postgres>,
     scope: LockScope,
@@ -136,7 +135,6 @@ async fn lock(
 
     if insert {
         if matches!(lock_type, LockType::Finished) {
-            // TODO delete or not
             sqlx::query("DELETE FROM saga_lock WHERE id = $1")
                 .bind(scope.id)
                 .execute(&mut **tx)
