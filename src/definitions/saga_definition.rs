@@ -118,7 +118,7 @@ where
 
                 let s = current_state.clone();
                 let f = Box::pin(async move {
-                    log::info!("executing step {definition_step}");
+                    log::trace!("executing step {definition_step}");
                     let operation_result = previous_executing.await?;
                     let factory_result = factory(&s, operation_result);
                     let existing_state = {
